@@ -93,6 +93,8 @@ DATA_FILES = [
         (r'includes/roast-template.htm', '.'),
         (r'includes/ranking-template.htm', '.'),
         (r'includes/Humor-Sans.ttf', '.'),
+        (r'includes/Roboto-Regular.ttf', '.'),
+        (r'includes/Roboto-Bold.ttf', '.'),
         (r'includes/WenQuanYiZenHei-01.ttf', '.'),
         (r'includes/WenQuanYiZenHeiMonoMedium.ttf', '.'),
         (r'includes/SourceHanSansCN-Regular.otf', '.'),

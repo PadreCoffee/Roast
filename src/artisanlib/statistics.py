@@ -26,7 +26,7 @@ import logging
 from PyQt6.QtCore import Qt, pyqtSlot, QSettings, QTimer
 from PyQt6.QtWidgets import (QApplication, QLabel, QDialogButtonBox, QGridLayout,
     QComboBox, QHBoxLayout, QVBoxLayout, QCheckBox, QGroupBox,
-    QSpinBox, QWidget, QTabWidget, QTableWidget, QPushButton, QHeaderView, QLineEdit)
+    QSpinBox, QWidget, QTabWidget, QTableWidget, QTableWidgetItem, QPushButton, QHeaderView, QLineEdit, QAbstractItemView)
 
 if TYPE_CHECKING:
     from artisanlib.main import ApplicationWindow # noqa: F401 # pylint: disable=unused-import
@@ -61,6 +61,10 @@ class StatisticsDlg(ArtisanResizeablDialog):
         if self.aw.qmc.statisticsflags[1]:
             self.barb.setChecked(True)
         self.barb.stateChanged.connect(self.changeStatisticsflag)
+        # Disable phases bar checkbox in Roast-like mode (phases shown on ax_phases strip instead)
+        if self.aw.qmc.roast_layout_like:
+            self.barb.setEnabled(False)
+            self.barb.setToolTip(QApplication.translate('Tooltip','Phases Bar not available in Roast-like layout mode (phases shown on bottom strip)'))
 
         # flag 2 not used anymore
 
@@ -361,6 +365,47 @@ class StatisticsDlg(ArtisanResizeablDialog):
         self.TabWidget.addTab(C2Widget,QApplication.translate('GroupBox','Stats Summary'))
         C2Widget.setContentsMargins(0, 0, 0, 0)  # left, top, right, bottom
 
+        ### tab3 - Hover / Bubble: configurable bubble lines (order + enabled)
+        self._hover_bubble_keys_order = ['time', 'roast_bt', 'roast_et', 'roast_ror', 'extra_devices', 'controls']
+        self._hover_bubble_key_labels = {
+            'time': QApplication.translate('Form Caption', 'Time'),
+            'roast_bt': QApplication.translate('CheckBox', 'BT'),
+            'roast_et': QApplication.translate('CheckBox', 'ET'),
+            'roast_ror': QApplication.translate('CheckBox', 'RoR'),
+            'extra_devices': QApplication.translate('Form Caption', 'Extra devices'),
+            'controls': QApplication.translate('Form Caption', 'Controls'),
+        }
+        self.hover_bubble_config: list[dict[str, Any]] = self._load_hover_bubble_config()
+        self.hoverBubbleTable = QTableWidget()
+        self.hoverBubbleTable.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.hoverBubbleTable.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.hoverBubbleTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.hoverBubbleTable.setColumnCount(2)
+        self.hoverBubbleTable.setHorizontalHeaderLabels([
+            QApplication.translate('Form Caption', 'Show'),
+            QApplication.translate('Form Caption', 'Line'),
+        ])
+        hoverBubbleUpBtn = QPushButton(QApplication.translate('Button', 'Up'))
+        hoverBubbleUpBtn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        hoverBubbleUpBtn.clicked.connect(self._hover_bubble_move_up)
+        hoverBubbleDownBtn = QPushButton(QApplication.translate('Button', 'Down'))
+        hoverBubbleDownBtn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        hoverBubbleDownBtn.clicked.connect(self._hover_bubble_move_down)
+        tab3btnLayout = QHBoxLayout()
+        tab3btnLayout.addStretch()
+        tab3btnLayout.addWidget(hoverBubbleUpBtn)
+        tab3btnLayout.addWidget(hoverBubbleDownBtn)
+        tab3layout = QVBoxLayout()
+        tab3layout.addWidget(QLabel(QApplication.translate('Form Caption', 'Bubble lines (roast data first, then controls). Order and visibility:')))
+        tab3layout.addWidget(self.hoverBubbleTable)
+        tab3layout.addLayout(tab3btnLayout)
+        tab3layout.setContentsMargins(0, 10, 0, 5)
+        C3Widget = QWidget()
+        C3Widget.setLayout(tab3layout)
+        self.TabWidget.addTab(C3Widget, QApplication.translate('Form Caption', 'Hover / Bubble'))
+        C3Widget.setContentsMargins(0, 0, 0, 0)
+        self._rebuild_hover_bubble_table()
+
         self.TabWidget.currentChanged.connect(self.tabSwitched)
 
         mainLayout = QVBoxLayout()
@@ -476,6 +521,14 @@ class StatisticsDlg(ArtisanResizeablDialog):
         settings.setValue('StatisticsPosition',self.frameGeometry().topLeft())
         self.aw.StatisticsDlg_activeTab = self.TabWidget.currentIndex()
 
+        # Hover / Bubble tab: apply config to qmc
+        for row in range(self.hoverBubbleTable.rowCount()):
+            cb = self.hoverBubbleTable.cellWidget(row, 0)
+            if isinstance(cb, QCheckBox) and row < len(self.hover_bubble_config):
+                self.hover_bubble_config[row]['enabled'] = cb.isChecked()
+        self.aw.qmc.hover_bubble_config = [dict(e) for e in self.hover_bubble_config]
+        self.aw.qmc.redraw(recomputeAllDeltas=False)
+
         self.updatetypes()
         self.close()
 
@@ -525,6 +578,70 @@ class StatisticsDlg(ArtisanResizeablDialog):
         vheader = self.summarystatstable.verticalHeader()
         if self.summarystatstable.cursor_navigation and vheader is not None:
             QTimer.singleShot(0, vheader.setFocus)
+
+    def _load_hover_bubble_config(self) -> list[dict[str, Any]]:
+        """Load hover bubble config from qmc or return default (order + all enabled)."""
+        raw = getattr(self.aw.qmc, 'hover_bubble_config', None)
+        if not raw or not isinstance(raw, list):
+            return [{'key': k, 'enabled': True} for k in self._hover_bubble_keys_order]
+        # Ensure all default keys exist and unknown keys are dropped
+        result: list[dict[str, Any]] = []
+        for e in raw:
+            if not isinstance(e, dict) or not e.get('key'):
+                continue
+            key = e.get('key')
+            if key not in self._hover_bubble_keys_order:
+                continue
+            result.append({'key': key, 'enabled': bool(e.get('enabled', True))})
+        for k in self._hover_bubble_keys_order:
+            if k not in {r['key'] for r in result}:
+                result.append({'key': k, 'enabled': True})
+        return result
+
+    def _rebuild_hover_bubble_table(self) -> None:
+        """Fill Hover/Bubble table from self.hover_bubble_config."""
+        self.hoverBubbleTable.setRowCount(len(self.hover_bubble_config))
+        for row, entry in enumerate(self.hover_bubble_config):
+            key = entry.get('key', '')
+            enabled = bool(entry.get('enabled', True))
+            cb = QCheckBox()
+            cb.setChecked(enabled)
+            cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            cb.stateChanged.connect(self._hover_bubble_checkbox_changed)
+            self.hoverBubbleTable.setCellWidget(row, 0, cb)
+            label = self._hover_bubble_key_labels.get(key, key)
+            self.hoverBubbleTable.setItem(row, 1, QTableWidgetItem(label))
+        vheader = self.hoverBubbleTable.verticalHeader()
+        if vheader is not None:
+            vheader.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+
+    @pyqtSlot(int)
+    def _hover_bubble_checkbox_changed(self, _state:int) -> None:
+        """Sync enabled state from table checkboxes to self.hover_bubble_config."""
+        sender = self.sender()
+        for row in range(self.hoverBubbleTable.rowCount()):
+            cb = self.hoverBubbleTable.cellWidget(row, 0)
+            if cb is sender and row < len(self.hover_bubble_config):
+                self.hover_bubble_config[row]['enabled'] = cb.isChecked()
+                break
+
+    @pyqtSlot()
+    def _hover_bubble_move_up(self) -> None:
+        row = self.hoverBubbleTable.currentRow()
+        if row <= 0 or row >= len(self.hover_bubble_config):
+            return
+        self.hover_bubble_config[row], self.hover_bubble_config[row - 1] = self.hover_bubble_config[row - 1], self.hover_bubble_config[row]
+        self._rebuild_hover_bubble_table()
+        self.hoverBubbleTable.selectRow(row - 1)
+
+    @pyqtSlot()
+    def _hover_bubble_move_down(self) -> None:
+        row = self.hoverBubbleTable.currentRow()
+        if row < 0 or row >= len(self.hover_bubble_config) - 1:
+            return
+        self.hover_bubble_config[row], self.hover_bubble_config[row + 1] = self.hover_bubble_config[row + 1], self.hover_bubble_config[row]
+        self._rebuild_hover_bubble_table()
+        self.hoverBubbleTable.selectRow(row + 1)
 
     @pyqtSlot(int)
     def tabSwitched(self, i:int) -> None:
@@ -780,6 +897,7 @@ class StatisticsDlg(ArtisanResizeablDialog):
         #save window geometry
         settings.setValue('StatisticsGeometry',self.saveGeometry())
         self.aw.StatisticsDlg_activeTab = self.TabWidget.currentIndex()
+        self.aw.qmc.ensure_hover_connected()
 
 #    @pyqtSlot(bool)
 #    def showSummarystatshelp(self, _:bool = False) -> None:

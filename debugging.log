@@ -1,0 +1,81 @@
+
+============================================================
+ROAST DEBUG LOG - 2026-02-14T12:45:28.229651
+============================================================
+Platform: Darwin 24.4.0 (arm64)
+Python: 3.13.12
+Matplotlib: 3.10.8
+System log path: /Users/lectrisheep/Desktop/RoastLogs/debugging.log
+Repo log path: /Users/lectrisheep/Documents/Projects/Roast/debugging.log
+ROAST_DEBUG env: 1
+============================================================
+
+{"redraw": {"roast_layout_like": true, "event_style": "roest", "ax_roast_bounds": [0.1041, 0.0598, 0.8453, 0.8714], "ax_controls_bounds": [], "ax_phases_bounds": [], "BT_present": false, "ET_present": false, "blit_used": false}}
+{"event": "PHASES_BAR_DRAWN", "ts": "2026-02-14T12:45:29.023265", "segments": 3, "labels_visible": "3/3", "rects_visible": "3/3", "show_labels": true}
+{"event": "RENDER_SNAPSHOT_SAVED", "ts": "2026-02-14T12:45:29.200822", "path": "/Users/lectrisheep/Desktop/RoastLogs/roast_like_render.png"}
+{"event": "PHASES_BAR_DRAWN", "ts": "2026-02-14T12:45:29.241244", "segments": 3, "labels_visible": "3/3", "rects_visible": "3/3", "show_labels": true}
+{"event": "RENDER_SNAPSHOT_SAVED", "ts": "2026-02-14T12:45:29.395312", "path": "/Users/lectrisheep/Desktop/RoastLogs/roast_like_render.png"}
+{"event": "PHASES_BAR_DRAWN", "ts": "2026-02-14T12:45:29.426802", "segments": 3, "labels_visible": "3/3", "rects_visible": "3/3", "show_labels": true}
+{"event": "RENDER_SNAPSHOT_SAVED", "ts": "2026-02-14T12:45:29.578780", "path": "/Users/lectrisheep/Desktop/RoastLogs/roast_like_render.png"}
+{"event": "motion_notify_event_callbacks", "count": 4, "callback_ids": [5, 11, 15, 18]}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:45:33.241259", "x": 847.657622992799, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "BT", "ET"], "controls_count": 3, "parts_count": 9}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:45:35.683727", "x": 226.8724183038189, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "flicktest", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:45:38.048648", "x": 517.0934808641331, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "flicktest", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:45:40.513426", "x": 386.41215755010273, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "flicktest", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:45:43.049373", "x": 154.2127295261579, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "flicktest", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:45:45.472264", "x": 538.7156555866169, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "flicktest", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:45:47.604911", "x": 203.2332777527149, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "flicktest", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:45:49.741865", "x": 520.4237322789256, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "flicktest", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:45:51.879239", "x": 354.16328226787397, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "flicktest", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "PHASES_BAR_DRAWN", "ts": "2026-02-14T12:46:03.775296", "segments": 3, "labels_visible": "3/3", "rects_visible": "3/3", "show_labels": true}
+{"event": "RENDER_SNAPSHOT_SAVED", "ts": "2026-02-14T12:46:03.928595", "path": "/Users/lectrisheep/Desktop/RoastLogs/roast_like_render.png"}
+{"event": "PHASES_BAR_DRAWN", "ts": "2026-02-14T12:46:03.961368", "segments": 3, "labels_visible": "3/3", "rects_visible": "3/3", "show_labels": true}
+{"event": "RENDER_SNAPSHOT_SAVED", "ts": "2026-02-14T12:46:04.113244", "path": "/Users/lectrisheep/Desktop/RoastLogs/roast_like_render.png"}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:46:05.008499", "x": 108.1258050057853, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:46:07.401494", "x": 502.8405171486067, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:46:09.943381", "x": 602.8191558272391, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:46:12.287344", "x": 141.62433891352038, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:46:14.533845", "x": 449.391909384406, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:46:16.766474", "x": 708.4843879961716, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:46:19.880990", "x": 75.04017015313103, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:46:22.344917", "x": 350.47069511512683, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:46:25.064638", "x": 471.6616031356752, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:46:29.034816", "x": 194.1162293549728, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T12:46:31.897810", "x": 0.5380438, "included_series": ["Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 8}
+
+============================================================
+ROAST DEBUG LOG - 2026-02-14T13:04:33.907494
+============================================================
+Platform: Darwin 24.4.0 (arm64)
+Python: 3.13.12
+Matplotlib: 3.10.8
+System log path: /Users/lectrisheep/Desktop/RoastLogs/debugging.log
+Repo log path: /Users/lectrisheep/Documents/Projects/Roast/debugging.log
+ROAST_DEBUG env: 1
+============================================================
+
+{"redraw": {"roast_layout_like": true, "event_style": "roest", "ax_roast_bounds": [0.1041, 0.0598, 0.8453, 0.8714], "ax_controls_bounds": [], "ax_phases_bounds": [], "BT_present": false, "ET_present": false, "blit_used": false}}
+{"event": "PHASES_BAR_DRAWN", "ts": "2026-02-14T13:04:34.688563", "segments": 3, "labels_visible": "3/3", "rects_visible": "3/3", "show_labels": true}
+{"event": "RENDER_SNAPSHOT_SAVED", "ts": "2026-02-14T13:04:34.860649", "path": "/Users/lectrisheep/Desktop/RoastLogs/roast_like_render.png"}
+{"event": "PHASES_BAR_DRAWN", "ts": "2026-02-14T13:04:34.898422", "segments": 3, "labels_visible": "3/3", "rects_visible": "3/3", "show_labels": true}
+{"event": "RENDER_SNAPSHOT_SAVED", "ts": "2026-02-14T13:04:35.047944", "path": "/Users/lectrisheep/Desktop/RoastLogs/roast_like_render.png"}
+{"event": "PHASES_BAR_DRAWN", "ts": "2026-02-14T13:04:35.079662", "segments": 3, "labels_visible": "3/3", "rects_visible": "3/3", "show_labels": true}
+{"event": "RENDER_SNAPSHOT_SAVED", "ts": "2026-02-14T13:04:35.226211", "path": "/Users/lectrisheep/Desktop/RoastLogs/roast_like_render.png"}
+{"event": "motion_notify_event_callbacks", "count": 4, "callback_ids": [5, 11, 15, 18]}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:04:38.208057", "x": 223.37835181952101, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:04:40.657184", "x": 453.62496392470604, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:04:43.204463", "x": 771.5369716, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:04:46.152701", "x": 428.6428926408735, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:04:48.394425", "x": 748.7437243179941, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:04:50.773430", "x": 198.0471626354576, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:04:53.282524", "x": 324.84745537990864, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:04:55.423486", "x": 152.20529681282704, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:04:57.850200", "x": 507.721453946066, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:05:00.280421", "x": 75.53363487749589, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:05:02.952486", "x": 336.4858376885686, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:05:05.141076", "x": 131.0400241113269, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "PHASES_BAR_DRAWN", "ts": "2026-02-14T13:05:13.888878", "segments": 3, "labels_visible": "3/3", "rects_visible": "3/3", "show_labels": true}
+{"event": "RENDER_SNAPSHOT_SAVED", "ts": "2026-02-14T13:05:14.041538", "path": "/Users/lectrisheep/Desktop/RoastLogs/roast_like_render.png"}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:05:17.082016", "x": 490.2286330027643, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:05:19.376628", "x": 99.57577335301436, "included_series": ["\u0394\u2009BT", "\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 10}
+{"event": "hover_tooltip", "ts": "2026-02-14T13:05:21.973889", "x": 69.67919624285416, "included_series": ["\u0394\u2009ET", "Inlet", "Outlet", "BT", "ET"], "controls_count": 3, "parts_count": 9}

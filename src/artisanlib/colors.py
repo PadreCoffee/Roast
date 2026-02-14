@@ -19,6 +19,11 @@ import platform
 
 from artisanlib.util import deltaLabelUTF8, rgba_colorname2argb_colorname, argb_colorname2rgba_colorname
 from artisanlib.dialogs import ArtisanDialog
+
+# Default curve colors when palette value is missing/invalid (avoids dialog/color picker errors)
+CURVE_COLOR_DEFAULTS: dict[str, str] = {
+    'et': '#1f77b4ff', 'bt': '#d62728ff', 'deltaet': '#000000ff', 'deltabt': '#d9910fff',
+}
 from typing import override, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -615,6 +620,7 @@ class graphColorDlg(ArtisanDialog):
     def closeEvent(self, a0:'QCloseEvent|None' = None) -> None:
         del a0
         self.aw.graphColorDlg_activeTab = self.TabWidget.currentIndex()
+        self.aw.qmc.ensure_hover_connected()
 
     @pyqtSlot(bool)
     def setLCD_bw(self, _:bool) -> None:
@@ -771,7 +777,9 @@ class graphColorDlg(ArtisanDialog):
             self.canvasLabel.setStyleSheet('QPushButton {background-color: #f0f0f0 ;' + self.commonstyle + '}')
 
     def setColorButton(self, button:QPushButton, tag:str) -> None:
-        c = self.aw.qmc.palette[tag]
+        c = self.aw.qmc.palette.get(tag) or CURVE_COLOR_DEFAULTS.get(tag)
+        if not c or str(c).strip() == '' or str(c) == 'None':
+            c = CURVE_COLOR_DEFAULTS.get(tag, self.aw.qmc.palette.get('background', '#ffffff'))
         button.setText(c)
         tc = self.aw.labelBorW(c)
         button.setStyleSheet('QPushButton {background: ' + rgba_colorname2argb_colorname(c) + '; color: ' + tc + ';' + self.commonstyle + '}')
@@ -933,7 +941,10 @@ class graphColorDlg(ArtisanDialog):
 
     # foreground colors
     def setColor(self, title:str, var:QPushButton, color:str) -> None:
-        labelcolor = QColor(rgba_colorname2argb_colorname(self.aw.qmc.palette[color]))
+        initial = self.aw.qmc.palette.get(color) or CURVE_COLOR_DEFAULTS.get(color)
+        if not initial or str(initial).strip() == '' or str(initial) == 'None':
+            initial = CURVE_COLOR_DEFAULTS.get(color, self.aw.qmc.palette.get('background', '#ffffffff'))
+        labelcolor = QColor(rgba_colorname2argb_colorname(initial))
         colorf = self.aw.colordialog(labelcolor, alphasupport=True)
         if colorf.isValid():
             self.aw.qmc.palette[color] = argb_colorname2rgba_colorname(colorf.name(QColor.NameFormat.HexArgb))

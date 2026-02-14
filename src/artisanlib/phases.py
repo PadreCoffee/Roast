@@ -98,6 +98,10 @@ class phasesGraphDlg(ArtisanDialog):
         self.fromBackgroundflag.stateChanged.connect(self.fromBackgroundflagChanged)
         self.watermarksflag = QCheckBox(QApplication.translate('CheckBox','Watermarks'))
         self.watermarksflag.setChecked(bool(self.aw.qmc.watermarksflag))
+        # Disable watermarks checkbox in Roast-like mode (phases shown on ax_phases strip instead)
+        if self.aw.qmc.roast_layout_like:
+            self.watermarksflag.setEnabled(False)
+            self.watermarksflag.setToolTip(QApplication.translate('Tooltip','Watermarks not available in Roast-like layout mode (phases shown on bottom strip)'))
         self.phasesLCDflag = QCheckBox(QApplication.translate('CheckBox','Phases LCDs'))
         self.phasesLCDflag.setChecked(bool(self.aw.qmc.phasesLCDflag))
         self.autoDRYflag = QCheckBox(QApplication.translate('CheckBox','Auto DRY'))

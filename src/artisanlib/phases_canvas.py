@@ -63,7 +63,7 @@ class MplPhasesCanvas(FigureCanvas):
 class tphasescanvas(QObject):
 
     __slots__ = [ 'canvas', 'aw', 'dpi_offset', 'barheight', 'm', 'g', 'data', 'ax' , 'tight_layout_params',
-            'phase_temperatures',  'tooltip_anno', 'tooltip_artist' ]
+            'phase_temperatures',  'tooltip_anno', 'tooltip_artist', 'hover_cid', 'hover_times' ]
 
     def __init__(self, dpi:int, aw:'ApplicationWindow') -> None:
         super().__init__()
@@ -88,7 +88,8 @@ class tphasescanvas(QObject):
         #
         self.ax:Axes|None = None
         self.clear_phases()
-        self.canvas.fig.canvas.mpl_connect('motion_notify_event', self.hover)
+        self.hover_cid:int = self.canvas.fig.canvas.mpl_connect('motion_notify_event', self.hover)
+        self.hover_times:list[float] = []
 
     def update_anno(self, artist:'Rectangle', text:str) -> None:
         if self.tooltip_anno is not None:
@@ -107,8 +108,24 @@ class tphasescanvas(QObject):
             except Exception as e:  # pylint: disable=broad-except
                 _log.exception(e)
 
+    def disconnectHandlers(self) -> None:
+        """Disconnect matplotlib event handlers (call on window close)."""
+        try:
+            if self.canvas is not None and self.canvas.fig is not None and getattr(self, 'hover_cid', None) is not None:
+                self.canvas.fig.canvas.mpl_disconnect(self.hover_cid)
+        except Exception:  # pylint: disable=broad-except
+            pass
+
     def hover(self, event:'Event') -> None:
         event = cast('MouseEvent', event)
+        if getattr(self.aw, 'debug_render', False):
+            import time as _time
+            self.hover_times.append(_time.perf_counter())
+            if len(self.hover_times) >= 50:
+                span = self.hover_times[-1] - self.hover_times[0]
+                rate = (len(self.hover_times) - 1) / span if span > 0 else 0
+                _log.info('hover_updates_per_sec=%.1f (phases canvas)', rate)
+                self.hover_times.clear()
         an_artist_is_hovered:bool = False
         if self.ax is not None and event.inaxes == self.ax:
             for artist in self.phase_temperatures:

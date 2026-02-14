@@ -23,14 +23,18 @@ from artisanlib import __release_sponsor_domain__
 from artisanlib import __release_sponsor_url__
 
 #import gc
+import bisect
 import time as libtime
+import atexit
 import os
+import shutil
 import sys  # @UnusedImport
 import ast
 import platform
 import math
 import warnings
 import datetime
+import json
 import numpy
 import logging
 import re
@@ -40,6 +44,7 @@ import psutil
 from psutil._common import bytes2human # pyright:ignore[reportPrivateImportUsage]
 from babel.units import get_unit_name
 
+from collections import deque
 from collections.abc import Callable, Sequence
 from typing import override, Final, Literal, Any, cast, TYPE_CHECKING
 
@@ -90,19 +95,28 @@ from PyQt6 import sip
 
 
 from matplotlib.figure import Figure # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
+from matplotlib.gridspec import GridSpec # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
 from matplotlib import rcParams, patches, transforms, ticker # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
 import matplotlib.patheffects as PathEffects # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
-from matplotlib.patches import Polygon, Rectangle # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
+from matplotlib.patches import Polygon, Rectangle, Circle # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
 from matplotlib.transforms import Bbox, Transform # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
 from matplotlib.backend_bases import PickEvent, MouseEvent # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
 from matplotlib.projections.polar import PolarAxes # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
 from matplotlib.text import Annotation, Text # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
 from matplotlib.lines import Line2D # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
-from matplotlib.offsetbox import DraggableAnnotation # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
+from matplotlib.offsetbox import DraggableAnnotation, AnnotationBbox, VPacker, TextArea # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
 from matplotlib.colors import to_hex, to_rgba # type:ignore[untyped-import,unused-ignore] # ty:ignore[ignore]
 
 from artisanlib.phidgets import PhidgetManager
+# Safe font helpers: never raise, so redraw is never aborted (main chart must always draw)
+def _safe_bold_fontproperties(size: float = 10.0) -> 'FontProperties':
+    from matplotlib.font_manager import FontProperties as _FP
+    return _FP(family='sans-serif', size=size, weight='bold')
+
+def _safe_regular_fontproperties(size: float = 9.0) -> 'FontProperties':
+    from matplotlib.font_manager import FontProperties as _FP
+    return _FP(family='sans-serif', size=size, weight='normal')
 from Phidget22.VoltageRange import VoltageRange # type: ignore[import-untyped] # ty:ignore[ignore]
 
 try:
@@ -142,6 +156,267 @@ type Interp1dKind = Literal['linear', 'nearest', 'nearest-up', 'zero', 'slinear'
 #        return retval
 #    return wrapper
 ##### END Profiling
+
+
+#######################################################################################
+#################### Debug Artifact Writer (works in dev + PyInstaller) ###############
+#######################################################################################
+
+# Global debug state - can be enabled via ROAST_DEBUG=1 environment variable
+_ROAST_DEBUG_ENABLED: bool = os.environ.get('ROAST_DEBUG', '').strip() in ('1', 'true', 'yes')
+_DEBUG_SYSTEM_LOG_PATH: str | None = None  # ~/Library/Logs/Roast/debugging.log (append)
+_DEBUG_REPO_LOG_PATH: str | None = None    # ./debugging.log in repo root (truncate per session)
+_DEBUG_LOG_INITIALIZED: bool = False
+
+def _get_debug_log_paths() -> tuple[str, str]:
+    """Get debug log paths: (system_log, repo_log). Creates directories as needed.
+    If ROAST_DEBUG=1 and ROAST_DEBUG_DIR is set, use that directory for system log; else default ~/Library/Logs/Roast (macOS) or ~/.roast/logs."""
+    global _DEBUG_SYSTEM_LOG_PATH, _DEBUG_REPO_LOG_PATH  # noqa: PLW0603
+    if _DEBUG_SYSTEM_LOG_PATH is not None and _DEBUG_REPO_LOG_PATH is not None:
+        return (_DEBUG_SYSTEM_LOG_PATH, _DEBUG_REPO_LOG_PATH)
+
+    # When ROAST_DEBUG_DIR is set, all debug artifacts (debugging.log + snapshots) go there
+    debug_dir_env = os.environ.get('ROAST_DEBUG_DIR', '').strip()
+    if _ROAST_DEBUG_ENABLED and debug_dir_env:
+        system_logs_dir = os.path.expanduser(debug_dir_env)
+        try:
+            os.makedirs(system_logs_dir, exist_ok=True)
+            _DEBUG_SYSTEM_LOG_PATH = os.path.join(system_logs_dir, 'debugging.log')
+            _DEBUG_REPO_LOG_PATH = _DEBUG_SYSTEM_LOG_PATH
+        except Exception:  # pylint: disable=broad-except
+            _DEBUG_SYSTEM_LOG_PATH = os.path.join(os.getcwd(), 'debugging.log')
+            _DEBUG_REPO_LOG_PATH = _DEBUG_SYSTEM_LOG_PATH
+    else:
+        if platform.system() == 'Darwin':
+            system_logs_dir = os.path.expanduser('~/Library/Logs/Roast')
+        else:
+            system_logs_dir = os.path.join(os.path.expanduser('~'), '.roast', 'logs')
+        try:
+            os.makedirs(system_logs_dir, exist_ok=True)
+            _DEBUG_SYSTEM_LOG_PATH = os.path.join(system_logs_dir, 'debugging.log')
+        except Exception:  # pylint: disable=broad-except
+            _DEBUG_SYSTEM_LOG_PATH = os.path.join(os.getcwd(), 'debugging_system.log')
+        # Repo log path (truncate mode): find repo root by looking for src/ or .git
+        repo_root = os.getcwd()
+        this_file_dir = os.path.dirname(os.path.abspath(__file__))
+        for _ in range(5):
+            if os.path.isdir(os.path.join(this_file_dir, 'src')) or os.path.isdir(os.path.join(this_file_dir, '.git')):
+                repo_root = this_file_dir
+                break
+            parent = os.path.dirname(this_file_dir)
+            if parent == this_file_dir:
+                break
+            this_file_dir = parent
+        _DEBUG_REPO_LOG_PATH = os.path.join(repo_root, 'debugging.log')
+
+    return (_DEBUG_SYSTEM_LOG_PATH, _DEBUG_REPO_LOG_PATH)
+
+
+def _get_roast_debug_dir() -> str:
+    """Directory for ROAST_DEBUG artifacts (roast_like_render.png, hover_state.json). Uses ROAST_DEBUG_DIR if set and ROAST_DEBUG=1, else default."""
+    debug_dir_env = os.environ.get('ROAST_DEBUG_DIR', '').strip()
+    if _ROAST_DEBUG_ENABLED and debug_dir_env:
+        return os.path.expanduser(debug_dir_env)
+    if platform.system() == 'Darwin':
+        return os.path.expanduser('~/Library/Logs/Roast')
+    return os.path.join(os.path.expanduser('~'), '.roast', 'logs')
+
+def _write_debug_header() -> None:
+    """Write header to debug logs (called once per session). Truncates repo log, appends to system log."""
+    global _DEBUG_LOG_INITIALIZED  # noqa: PLW0603
+    if _DEBUG_LOG_INITIALIZED:
+        return
+    _DEBUG_LOG_INITIALIZED = True
+
+    import matplotlib
+    system_path, repo_path = _get_debug_log_paths()
+    header_lines = [
+        '=' * 60,
+        f'ROAST DEBUG LOG - {datetime.datetime.now().isoformat()}',
+        '=' * 60,
+        f'Platform: {platform.system()} {platform.release()} ({platform.machine()})',
+        f'Python: {platform.python_version()}',
+        f'Matplotlib: {matplotlib.__version__}',
+        f'System log path: {system_path}',
+        f'Repo log path: {repo_path}',
+        f'ROAST_DEBUG env: {os.environ.get("ROAST_DEBUG", "(not set)")}',
+        '=' * 60,
+        '',
+    ]
+    header = '\n'.join(header_lines) + '\n'
+
+    try:
+        if system_path == repo_path:
+            with open(repo_path, 'w', encoding='utf-8') as f:
+                f.write(header)
+            print(f'[ROAST_DEBUG] Debug log: {repo_path}')
+        else:
+            with open(repo_path, 'w', encoding='utf-8') as f:
+                f.write(header)
+            print(f'[ROAST_DEBUG] Repo log (truncated): {repo_path}')
+            with open(system_path, 'a', encoding='utf-8') as f:
+                f.write('\n' + header)
+            print(f'[ROAST_DEBUG] System log (append): {system_path}')
+    except Exception as e:  # pylint: disable=broad-except
+        print(f'[ROAST_DEBUG] Failed to write debug log header: {e}')
+
+def write_debug_artifact(text: str) -> None:
+    """Append text to system debug log only. Repo copy is written at exit."""
+    if not _ROAST_DEBUG_ENABLED:
+        return
+    system_path, _ = _get_debug_log_paths()
+    line = text if text.endswith('\n') else text + '\n'
+    try:
+        with open(system_path, 'a', encoding='utf-8') as f:
+            f.write(line)
+    except Exception:  # pylint: disable=broad-except
+        pass
+
+def _roast_debug_log_json(data: dict[str, Any]) -> None:
+    """Append one NDJSON line to system debug log (ROAST_DEBUG=1 only)."""
+    if not _ROAST_DEBUG_ENABLED:
+        return
+    system_path, _ = _get_debug_log_paths()
+    try:
+        with open(system_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(data, default=str) + '\n')
+    except Exception:  # pylint: disable=broad-except
+        pass
+
+def _roast_debug_copy_to_repo() -> None:
+    """Copy system debug log to repo (overwrite). No-op when ROAST_DEBUG_DIR is set (same path)."""
+    if not _ROAST_DEBUG_ENABLED:
+        return
+    try:
+        system_path, repo_path = _get_debug_log_paths()
+        if system_path and os.path.isfile(system_path) and system_path != repo_path:
+            shutil.copy2(system_path, repo_path)
+    except Exception:  # pylint: disable=broad-except
+        pass
+
+def debug_checkpoint(tag: str, data: dict[str, Any]) -> None:
+    """Log a debug checkpoint with tag and data dict (one JSON line to system log)."""
+    if not _ROAST_DEBUG_ENABLED:
+        return
+    payload = {'event': tag, 'ts': datetime.datetime.now().isoformat(), **data}
+    _roast_debug_log_json(payload)
+
+# Cursor debug log (NDJSON) for runtime hypothesis testing
+_CURSOR_DEBUG_LOG_PATH: str = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '.cursor', 'debug.log'))
+
+def _hover_diag_log(message: str, data: dict[str, Any], hypothesis_id: str = '', location: str = '') -> None:
+    """Append one NDJSON line to .cursor/debug.log for hover diagnostics (always, no ROAST_DEBUG check)."""
+    try:
+        payload = {'timestamp': int(datetime.datetime.now().timestamp() * 1000), 'message': message, 'data': data, 'location': location or 'canvas.py'}
+        if hypothesis_id:
+            payload['hypothesisId'] = hypothesis_id
+        with open(_CURSOR_DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(payload, default=str) + '\n')
+    except Exception:  # pylint: disable=broad-except
+        pass
+
+def _hover_diag_artist(name: str, artist: Any) -> dict[str, Any]:
+    """Return dict with artist diagnostics: is_none, axes_id, figure_id, visible, animated, zorder."""
+    if artist is None:
+        return {'artist': name, 'is_none': True}
+    try:
+        ax = getattr(artist, 'axes', None)
+        fig = getattr(artist, 'figure', None)
+        return {
+            'artist': name, 'is_none': False,
+            'axes_id': id(ax) if ax is not None else None,
+            'figure_id': id(fig) if fig is not None else None,
+            'visible': artist.get_visible() if hasattr(artist, 'get_visible') else None,
+            'animated': artist.get_animated() if hasattr(artist, 'get_animated') else None,
+            'zorder': artist.get_zorder() if hasattr(artist, 'get_zorder') else None,
+        }
+    except Exception as e:  # pylint: disable=broad-except
+        return {'artist': name, 'is_none': False, 'error': str(e)}
+
+def _cursor_debug_log(message: str, data: dict[str, Any], hypothesis_id: str = '', location: str = '') -> None:
+    """Append one NDJSON line to .cursor/debug.log only when ROAST_DEBUG=1."""
+    if os.environ.get('ROAST_DEBUG') != '1':
+        return
+    try:
+        payload = {'timestamp': int(datetime.datetime.now().timestamp() * 1000), 'message': message, 'data': data, 'location': location or 'canvas.py'}
+        if hypothesis_id:
+            payload['hypothesisId'] = hypothesis_id
+        with open(_CURSOR_DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(payload, default=str) + '\n')
+    except Exception:  # pylint: disable=broad-except
+        pass
+
+def _roast_debug_bbox_px(bbox: Any) -> list[float]:
+    """Return bbox bounds in pixels [x0, y0, w, h] for ROAST_DEBUG logging."""
+    if bbox is None:
+        return []
+    try:
+        b = getattr(bbox, 'bounds', None)
+        return [round(float(x), 2) for x in b] if b is not None else []
+    except Exception:  # pylint: disable=broad-except
+        return []
+
+# Initialize debug log on import if enabled; copy system log to repo root at exit
+if _ROAST_DEBUG_ENABLED:
+    _write_debug_header()
+    atexit.register(_roast_debug_copy_to_repo)
+
+
+#######################################################################################
+#################### Safe Limit Comparison Helpers  ###################################
+#######################################################################################
+
+def _is_valid_number(v: Any) -> bool:
+    """Check if value is a valid finite number (not None, not NaN, not inf)."""
+    if v is None:
+        return False
+    try:
+        f = float(v)
+        return math.isfinite(f)
+    except (TypeError, ValueError):
+        return False
+
+def _safe_cmp_le(a: Any, b: Any) -> bool | None:
+    """Safe a <= b comparison. Returns None if comparison is invalid (either operand is None/NaN/inf)."""
+    if not _is_valid_number(a) or not _is_valid_number(b):
+        return None
+    return float(a) <= float(b)
+
+def _safe_cmp_lt(a: Any, b: Any) -> bool | None:
+    """Safe a < b comparison. Returns None if comparison is invalid."""
+    if not _is_valid_number(a) or not _is_valid_number(b):
+        return None
+    return float(a) < float(b)
+
+def _valid_lim_pair(lo: Any, hi: Any) -> bool:
+    """Check if (lo, hi) is a valid limit pair: both finite and lo <= hi."""
+    if not _is_valid_number(lo) or not _is_valid_number(hi):
+        return False
+    return float(lo) <= float(hi)
+
+def _safe_set_lim(ax: Any, lo: Any, hi: Any, axis: str = 'y') -> bool:
+    """Safely set axis limits. Returns True if limits were set, False if skipped (invalid)."""
+    if ax is None:
+        return False
+    if not _valid_lim_pair(lo, hi):
+        if _ROAST_DEBUG_ENABLED:
+            debug_checkpoint('SKIP_SET_LIM', {
+                'axis': axis,
+                'lo': lo,
+                'hi': hi,
+                'reason': 'invalid_lim_pair'
+            })
+        return False
+    try:
+        if axis == 'x':
+            ax.set_xlim(float(lo), float(hi))
+        else:
+            ax.set_ylim(float(lo), float(hi))
+        return True
+    except Exception as e:  # pylint: disable=broad-except
+        if _ROAST_DEBUG_ENABLED:
+            debug_checkpoint('SET_LIM_ERROR', {'axis': axis, 'lo': lo, 'hi': hi, 'error': str(e)})
+        return False
 
 
 #######################################################################################
@@ -364,7 +639,7 @@ class tgraphcanvas(QObject):
         'kind_list', 'perKgRoastMode', 'loadlabels', 'loadratings', 'ratingunits', 'sourcetypes', 'load_etypes', 'presssure_percents', 'loadevent_zeropcts',
         'loadevent_hundpcts', 'preheatDuration', 'preheatenergies', 'betweenbatchDuration', 'betweenbatchenergies', 'coolingDuration', 'coolingenergies',
         'betweenbatch_after_preheat', 'electricEnergyMix', 'gasMix', 'baseX', 'baseY', 'base_horizontalcrossline', 'base_verticalcrossline',
-        'base_messagevisible', 'colorDifferenceThreshold', 'handles', 'labels', 'legend_lines', 'eventmessage', 'backgroundeventmessage',
+        'base_messagevisible', 'colorDifferenceThreshold', 'handles', 'labels', 'legend_lines', 'legend_series_keys', 'eventmessage', 'backgroundeventmessage',
         'eventmessagetimer', 'resizeredrawing', 'logoimg', 'analysisresultsloc_default', 'analysisresultsloc', 'analysispickflag', 'analysisresultsstr',
         'analysisstartchoice', 'analysisoffset', 'curvefitstartchoice', 'curvefitoffset', 'segmentresultsloc_default', 'segmentresultsloc',
         'segmentpickflag', 'segmentdeltathreshold', 'segmentsamplesthreshold', 'stats_summary_rect', 'title_text', 'title_artist', 'title_width',
@@ -378,7 +653,14 @@ class tgraphcanvas(QObject):
         'CO2kg_per_BTU_default', 'CO2kg_per_BTU', 'Biogas_CO2_Reduction', 'Biogas_CO2_Reduction_default',
         'meterunitnames', 'meterreads_default', 'meterreads', 'meterlabels_setup', 'meterlabels', 'meterunits_setup', 'meterunits',
         'meterfuels_setup', 'meterfuels', 'metersources_setup', 'metersources', 'playbackdrop_min_roasttime', 'TP_max_roasttime',
-        'single_click_mpl_upperleft_corner_timer', 'single_click_mpl_upperleft_corner_TIMEOUT'
+        'single_click_mpl_upperleft_corner_timer', 'single_click_mpl_upperleft_corner_TIMEOUT',
+        'roast_layout_like', 'ax_controls', 'ax_phases', 'event_style',
+        'onrelease_cid', 'render_times', 'hover_times',
+        '_roast_hover_line', '_roast_hover_anno', '_roast_hover_last_update',
+        '_roast_hover_line_controls', '_roast_hover_line_phases',
+        '_roast_hover_texts', '_roast_hover_bg', '_roast_hover_markers',
+        '_roast_hover_debug_count',
+        '_phases_bar_rects', '_phases_bar_texts', 'ax_phases_background'
         ]
 
 
@@ -1241,6 +1523,39 @@ class tgraphcanvas(QObject):
         self.ax = self.fig.add_subplot(111,facecolor=self.palette['background'])
         self.delta_ax:_AxesBase|None = None
         self.delta_ax = self.ax.twinx()
+        # A) CRITICAL: Make delta_ax patch invisible so it doesn't cover ax curves
+        self.delta_ax.set_facecolor('none')
+        self.delta_ax.patch.set_visible(False)
+        self.delta_ax.patch.set_alpha(0.0)
+
+        # Roast-like layout: separate axes for temps/RoR (ax), events band (ax_events), controls (ax_controls), phases strip (ax_phases)
+        self.roast_layout_like:bool = False
+        self.ax_events:_AxesBase|None = None  # thin band for event labels in Roast-like layout
+        self.ax_controls:_AxesBase|None = None
+        self.ax_phases:_AxesBase|None = None
+        self.phases_bar_show_labels:bool = True  # show "MM:SS (XX.X%)" in phase bar segments on ax_phases
+        # Roast-like hover tooltip: which values to show (all default True); see Axis dialog
+        self.roast_tooltip_show_bt:bool = True
+        self.roast_tooltip_show_et:bool = True
+        self.roast_tooltip_show_ror_et:bool = True
+        self.roast_tooltip_show_ror_bt:bool = True
+        self.roast_tooltip_show_extra:bool = True
+        # per extra device index (from Devices): only indices that exist are used
+        self.roast_tooltip_show_extra_by_index:dict[int, bool] = {}
+        self.roast_tooltip_show_e1:bool = True
+        self.roast_tooltip_show_e2:bool = True
+        self.roast_tooltip_show_e3:bool = True
+        self.roast_tooltip_show_e4:bool = True
+        # Configurable hover bubble: order and enabled flags (Statistics > Hover / Bubble).
+        # List of {"key": str, "enabled": bool}. Keys: time, roast_bt, roast_et, roast_ror, extra_devices, controls.
+        self.hover_bubble_config: list[dict[str, Any]] = [
+            {'key': 'time', 'enabled': True},
+            {'key': 'roast_bt', 'enabled': True},
+            {'key': 'roast_et', 'enabled': True},
+            {'key': 'roast_ror', 'enabled': True},
+            {'key': 'extra_devices', 'enabled': True},
+            {'key': 'controls', 'enabled': True},
+        ]
 
         #legend location
         self.legendloc:int = 4
@@ -1278,9 +1593,36 @@ class tgraphcanvas(QObject):
         #
         self.event_selected:bool = False # set on pick and unset on move, used in onrelease_after_pick which clears foreground/background_event_last_picked if still set
 
-        self.onmove_cid:int = self.fig.canvas.mpl_connect('motion_notify_event', self.onmove)
+        self.onmove_cid:int|None = self.fig.canvas.mpl_connect('motion_notify_event', self.onmove)
 
-        self.fig.canvas.mpl_connect('button_release_event', self.onrelease_after_pick)
+        self.onrelease_cid:int = self.fig.canvas.mpl_connect('button_release_event', self.onrelease_after_pick)
+
+        # debug_render: rolling history for render times (ms) and hover event timestamps
+        self.render_times:deque[float] = deque(maxlen=50)
+        self.hover_times:deque[float] = deque(maxlen=100)
+
+        # Roast-like layout hover: vertical lines on ax (roast) and ax_controls; one tooltip; throttle 1/60 s
+        self._roast_hover_line:Line2D|None = None
+        self.roest_vline_roast:Line2D|None = None   # alias for _roast_hover_line (ax)
+        self.roest_vline_controls:Line2D|None = None  # alias for _roast_hover_line_controls
+        self._roast_hover_anno:Annotation|None = None
+        self._roast_hover_bbox:Any = None  # AnnotationBbox (VPacker of TextArea) for colored bubble
+        self._roast_hover_line_events:Line2D|None = None
+        self._roast_hover_line_controls:Line2D|None = None
+        self._roast_hover_line_phases:Line2D|None = None
+        self._roast_hover_last_update:float = 0.0
+        self._roast_hover_debug_count:int = 0  # for ROAST_DEBUG: log every ~50 hover events
+        self._roast_debug_motion_logged:bool = False  # ROAST_DEBUG: log motion_notify_event callbacks once
+        self._roast_hover_texts:list[Any] = []  # Text artists for colored tooltip lines (legacy fixed HUD)
+        self._roast_hover_bg:Any = None  # Rectangle patch for tooltip background (legacy)
+        self._roast_hover_markers:list[Any] = []  # kept for cleanup; actual markers in _roast_hover_markers_dict
+        self._roast_hover_markers_dict:dict[str, Any] = {}  # curve raw_key -> Line2D marker; update via set_data on hover
+        self._hover_line_map:dict[str, Any] = {}  # label -> Line2D for BT/ET/RoR/extra and Air/Drum/Burner/Power (bubble text color from line.get_color())
+
+        # Phases bar (ax_phases): persistent 3 rects + 3 texts, update only x/width/text/visible
+        self._phases_bar_rects:list[Rectangle]|None = None
+        self._phases_bar_texts:list[Text]|None = None
+        self.ax_phases_background:Any = None  # for blit in live path
 
         # set the parent widget
 #        self.setParent(parent)
@@ -2111,6 +2453,9 @@ class tgraphcanvas(QObject):
 
         self.l_eventflagbackannos:list[Annotation] = [] # collects all the background profile flag annotations in Step+ mode (self.eventsGraphflag == 3)
 
+        self.l_roest_vlines:list = []  # vertical line artists for Roest markers (Roast-like layout)
+        self.l_roest_labels:list = []  # text artists for Roest marker labels
+
         self.l_annotations:list[Annotation] = []
         self.l_background_annotations:list[Annotation] = []
 
@@ -2502,10 +2847,11 @@ class tgraphcanvas(QObject):
         #threshold for deltaE color difference comparisons
         self.colorDifferenceThreshold = 20
 
-        #references to legend objects
+        #references to legend objects; legend_series_keys mirrors handles/labels: each entry is a key (e.g. ('ET',), ('DeltaBT',), ('T1', i), ('E', etype)) so legend click updates centralized visibility and redraw recreates artists from state
         self.handles:list[Line2D] = []
         self.labels:list[str] = []
         self.legend_lines:list[Line2D] = []
+        self.legend_series_keys:list[tuple[str, ...]] = []
 
         #used for picked event messages
         self.eventmessage = ''
@@ -2808,11 +3154,30 @@ class tgraphcanvas(QObject):
 
             if self.ax is not None:
                 axfig = self.ax.get_figure()
-                if axfig is not None and hasattr(self.fig.canvas,'copy_from_bbox'):
-                    self.ax_background = self.fig.canvas.copy_from_bbox(axfig.bbox) # ty:ignore[call-non-callable] # pyright: ignore[reportAttributeAccessIssue]
-                    # we redraw the additional artists like the projection lines, the timeline and the AUC guide line
+                roast_like = getattr(self, 'roast_layout_like', False)
+                use_blit = not roast_like and axfig is not None and hasattr(self.fig.canvas, 'copy_from_bbox')
+                # Roast-like: skip blit to avoid half-updated artefacts; full draw() above is the only repaint.
+                if use_blit:
+                    self.ax_background = self.fig.canvas.copy_from_bbox(axfig.bbox)  # type: ignore[call-non-callable]
                     self.update_additional_artists()
                     self.fig.canvas.blit(axfig.bbox)
+                # ROAST_DEBUG only: one per-redraw line to both system and repo debug logs
+                if os.environ.get('ROAST_DEBUG') == '1':
+                    def _bnd(a: Any) -> list[float]:
+                        return [round(x, 4) for x in a.get_position().bounds] if a is not None else []
+                    payload = {
+                        'redraw': {
+                            'roast_layout_like': roast_like,
+                            'event_style': getattr(self, 'event_style', None),
+                            'ax_roast_bounds': _bnd(self.ax),
+                            'ax_controls_bounds': _bnd(getattr(self, 'ax_controls', None)),
+                            'ax_phases_bounds': _bnd(getattr(self, 'ax_phases', None)),
+                            'BT_present': self.l_temp2 is not None,
+                            'ET_present': self.l_temp1 is not None,
+                            'blit_used': use_blit,
+                        }
+                    }
+                    write_debug_artifact(json.dumps(payload, default=str))
 
     def device_name_subst(self, device_name:str) -> str:
         try:
@@ -3076,6 +3441,34 @@ class tgraphcanvas(QObject):
         self.ax_background = None
         # we trigger a re-fit of the titles to fit to the resized MPL canvas
         self.fit_titles()
+        # Roast-like: after any full draw, axes may have been cleared — re-ensure hover artists so bubble/vline/markers exist and are on current axes
+        if getattr(self, 'roast_layout_like', False) and self.ax is not None:
+            self._roast_hover_invalidate_stale()
+            self._roast_hover_ensure_artists()
+        # #region agent log: draw_event background and callbacks
+        try:
+            cbs = getattr(self.fig.canvas.callbacks, 'callbacks', None) or {}
+            _hover_diag_log('draw_event', {
+                'background_cached_ax': False,
+                'background_cached_ax_controls': False,
+                'ax_background_is_None': self.ax_background is None,
+                'motion_notify_ids': list(cbs.get('motion_notify_event', {}).keys()),
+                'draw_event_ids': list(cbs.get('draw_event', {}).keys()),
+                'onmove_cid': self.onmove_cid,
+            }, hypothesis_id='H3', location='canvas.py:_draw_event')
+        except Exception:  # pylint: disable=broad-except
+            pass
+        # #endregion
+        if _ROAST_DEBUG_ENABLED:
+            try:
+                cbs = getattr(self.fig.canvas.callbacks, 'callbacks', None) or {}
+                motion_ids = list(cbs.get('motion_notify_event', {}).keys())
+                draw_ids = list(cbs.get('draw_event', {}).keys())
+                payload = {'event': 'draw_event_after_redraw', 'motion_notify_ids': motion_ids, 'draw_event_ids': draw_ids, 'onmove_cid': self.onmove_cid}
+                _roast_debug_log_json(payload)
+                _cursor_debug_log('draw_event callbacks', payload, location='canvas.py:_draw_event')
+            except Exception:  # pylint: disable=broad-except
+                pass
 
     @pyqtSlot()
     def sendeventmessage(self) -> None:
@@ -3132,68 +3525,43 @@ class tgraphcanvas(QObject):
                 elif self.aw.segmentresultsanno is not None and isinstance(event_artist, Annotation) and event_artist in [self.aw.segmentresultsanno]:
                     self.segmentpickflag = True
 
-                # toggle visibility of graph lines by clicking on the legend
+                # toggle visibility of graph lines by clicking on the legend — use centralized series keys so state survives redraw (redraw clears axes and recreates artists)
                 elif not bool(self.aw.comparator) and self.legend is not None and event_artist != self.legend and isinstance(event_artist, (Line2D, Text)) \
                     and event_artist not in [self.l_backgroundeventtype1dots,self.l_backgroundeventtype2dots,self.l_backgroundeventtype3dots,self.l_backgroundeventtype4dots] \
                     and event_artist not in [self.l_eventtype1dots,self.l_eventtype2dots,self.l_eventtype3dots,self.l_eventtype4dots]:
-                    idx = None
-                    # deltaLabelMathPrefix (legend label)
-                    # deltaLabelUTF8 (artist)
+                    idx: int | None = None
                     if isinstance(event_artist, Text):
-                        artist = None
-                        label = None
                         try:
-                            label = event_artist.get_text()
-                            idx = self.labels.index(label)
+                            idx = self.labels.index(event_artist.get_text())
                         except Exception: # pylint: disable=broad-except
                             pass
-                        if label is not None and idx is not None:
-                            if label == self.aw.ETname:
-                                label = 'ET'  #allows for a match below to the label in legend_lines
-                                try:
-                                    for a in self.l_eteventannos:
-                                        a.set_visible(not a.get_visible())
-                                    if self.met_annotate is not None:
-                                        self.met_annotate.set_visible(not self.met_annotate.get_visible())
-                                except Exception: # pylint: disable=broad-except
-                                    pass
-                            elif label == self.aw.BTname:
-                                label = 'BT'  #allows for a match below to the label in legend_lines
-                                try:
-                                    for a in self.l_bteventannos:
-                                        a.set_visible(not a.get_visible())
-                                except Exception: # pylint: disable=broad-except
-                                    pass
-                            try:
-                                # toggle also the visibility of the legend handle
-                                clean_label = label.replace(deltaLabelMathPrefix,deltaLabelUTF8)
-                                artist = next((x for x in self.legend_lines if x.get_label() == clean_label), None)
-                                if artist:
-                                    artist.set_visible(not artist.get_visible())
-                            except Exception: # pylint: disable=broad-except
-                                pass
-                        # toggle the visibility of the corresponding line
-                        if idx is not None and artist:
-                            artist = self.handles[idx]
-                            artist.set_visible(not artist.get_visible())
-                            if self.eventsGraphflag in {2, 3, 4} and label is not None:
-                                # if events are rendered in Combo style we need to hide also the corresponding annotations:
-                                try:
-                                    i = [self.aw.arabicReshape(et) for et in self.etypes[:4]].index(label)
-                                    if i == 0:
-                                        for a in self.l_eventtype1annos:
-                                            a.set_visible(not a.get_visible())
-                                    elif i == 1:
-                                        for a in self.l_eventtype2annos:
-                                            a.set_visible(not a.get_visible())
-                                    elif i == 2:
-                                        for a in self.l_eventtype3annos:
-                                            a.set_visible(not a.get_visible())
-                                    elif i == 3:
-                                        for a in self.l_eventtype4annos:
-                                            a.set_visible(not a.get_visible())
-                                except Exception: # pylint: disable=broad-except
-                                    pass
+                    elif event_artist in self.handles:
+                        idx = self.handles.index(event_artist)
+                    elif event_artist in self.legend_lines:
+                        try:
+                            idx = self.legend_lines.index(event_artist)
+                        except ValueError:
+                            pass
+                    if idx is not None and idx < len(self.legend_series_keys):
+                        key = self.legend_series_keys[idx]
+                        try:
+                            if key == ('ET',):
+                                self.showCurve('ET', not self.ETcurve)
+                            elif key == ('BT',):
+                                self.showCurve('BT', not self.BTcurve)
+                            elif key == ('DeltaET',):
+                                self.showCurve('DeltaET', not self.DeltaETflag)
+                            elif key == ('DeltaBT',):
+                                self.showCurve('DeltaBT', not self.DeltaBTflag)
+                            elif len(key) == 2 and key[0] == 'T1' and self.aw is not None and key[1] < len(self.aw.extraCurveVisibility1):
+                                self.showExtraCurve(key[1], 'T1', not self.aw.extraCurveVisibility1[key[1]])
+                            elif len(key) == 2 and key[0] == 'T2' and self.aw is not None and key[1] < len(self.aw.extraCurveVisibility2):
+                                self.showExtraCurve(key[1], 'T2', not self.aw.extraCurveVisibility2[key[1]])
+                            elif len(key) == 2 and key[0] == 'E' and key[1] < len(self.showEtypes):
+                                self.showEvents(key[1] + 1, not self.showEtypes[key[1]])
+                            # showCurve / showExtraCurve / showEvents call redraw(), so legend and lines are recreated from state
+                        except Exception: # pylint: disable=broad-except
+                            pass
 
                 # show event information by clicking on event lines in step, step+ and combo modes
                 elif not bool(self.aw.comparator) and isinstance(event_artist, Line2D):
@@ -3702,6 +4070,41 @@ class tgraphcanvas(QObject):
             _log.exception(e)
         self.release_picked_event()
 
+    def disconnectCanvasHandlers(self) -> None:
+        """Disconnect all matplotlib event handlers (call on window close)."""
+        try:
+            canvas = self.fig.canvas if self.fig is not None else None
+            if canvas is None:
+                return
+            for name, cid in [
+                    ('onclick_cid', self.onclick_cid),
+                    ('oncpick_cid', self.oncpick_cid),
+                    ('ondraw_cid', self.ondraw_cid),
+                    ('onmove_cid', self.onmove_cid),
+                    ('onrelease_cid', self.onrelease_cid),
+                    ('crossmouseid', getattr(self, 'crossmouseid', None)),
+                    ('onreleaseid', getattr(self, 'onreleaseid', None)),
+                    ('analyzer_connect_id', getattr(self, 'analyzer_connect_id', None))]:
+                if cid is not None:
+                    try:
+                        canvas.mpl_disconnect(cid)
+                    except Exception: # pylint: disable=broad-except
+                        pass
+            for dc in getattr(self, 'designerconnections', []) or []:
+                if dc is not None:
+                    try:
+                        canvas.mpl_disconnect(dc)
+                    except Exception: # pylint: disable=broad-except
+                        pass
+            for wc in getattr(self, 'wheelconnections', []) or []:
+                if wc is not None:
+                    try:
+                        canvas.mpl_disconnect(wc)
+                    except Exception: # pylint: disable=broad-except
+                        pass
+        except Exception: # pylint: disable=broad-except
+            pass
+
     def release_picked_event(self) -> None:
         self.foreground_event_ind = None
         self.foreground_event_pos = None
@@ -3865,11 +4268,902 @@ class tgraphcanvas(QObject):
             count += 1
         return count
 
+    # -------------------------------------------------------------------------
+    # Roast-like Layout Mode Helpers
+    # -------------------------------------------------------------------------
+    # When roast_layout_like=True, the chart uses a split layout with separate
+    # axes: ax (temps/RoR), ax_events (event labels), ax_controls (E1-E4 step
+    # lines 0-100%), and ax_phases (phase bar with time labels).
+    #
+    # In this mode, event_style is forced to 'roest' which means:
+    #   - Main roast events (CHARGE, TP, DRY, FCs, FCe, SCs, SCe, DROP) are
+    #     rendered as Roest markers (vertical dashed lines + labels) instead
+    #     of classic place_annotations().
+    #   - E1-E4 control event annotations are suppressed (step lines only).
+    #   - Phase watermarks and statistics bars on main ax are skipped.
+    #   - X-axis time labels appear only on ax_phases (bottom strip).
+    #
+    # Use is_roest_mode() to check if Roest markers should be used.
+    # Use is_split_layout() to check if the split axes layout is active.
+    # -------------------------------------------------------------------------
+
+    def is_roest_mode(self) -> bool:
+        """True when using Roast-like layout (Roest markers only; classic event style ignored).
+
+        In Roast-like we always use Roest-style rendering regardless of event_style:
+        - Main events rendered as vertical dashed lines + labels (not classic annotations)
+        - E1-E4 step lines on ax_controls only (no classic flag/bar/step+ annotations)
+        - Phase bar on ax_phases strip only
+        """
+        return bool(self.roast_layout_like)
+
+    def is_split_layout(self) -> bool:
+        """True when using Roast-like split layout.
+
+        In split layout mode, the following axes exist:
+        - ax: main temperature/RoR curves
+        - ax_events: thin band for event labels
+        - ax_controls: E1-E4 step lines (0-100%)
+        - ax_phases: phase bar with time labels
+        """
+        return self.roast_layout_like
+
+    def _roast_hover_invalidate_stale(self) -> None:
+        """Clear refs to hover artists that are stale (axes/figure None after cla/clf). Call before ensure_artists or on first hover."""
+        def _stale(artist: Any) -> bool:
+            if artist is None:
+                return True
+            try:
+                return getattr(artist, 'axes', None) is None or getattr(artist, 'figure', None) is None
+            except Exception:  # pylint: disable=broad-except
+                return True
+        if _stale(self._roast_hover_line):
+            self._roast_hover_line = None
+            self.roest_vline_roast = None
+        if _stale(self._roast_hover_line_controls):
+            self._roast_hover_line_controls = None
+            self.roest_vline_controls = None
+        if _stale(self._roast_hover_anno):
+            self._roast_hover_anno = None
+        if _stale(getattr(self, '_roast_hover_bbox', None)):
+            self._roast_hover_bbox = None
+        if _stale(self._roast_hover_bg):
+            self._roast_hover_bg = None
+        for t in list(self._roast_hover_texts or []):
+            if _stale(t):
+                try:
+                    t.remove()
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                self._roast_hover_texts.remove(t)
+        md = getattr(self, '_roast_hover_markers_dict', None)
+        if md:
+            for k, m in list(md.items()):
+                if _stale(m):
+                    try:
+                        m.remove()
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                    del md[k]
+
+    def _roast_hover_hide(self) -> None:
+        """Hide roast hover crosshair (ax + ax_controls only) and single HUD tooltip."""
+        for line in (self._roast_hover_line, self._roast_hover_line_controls):
+            if line is not None:
+                try:
+                    line.set_visible(False)
+                except Exception:  # pylint: disable=broad-except
+                    pass
+        if self._roast_hover_anno is not None:
+            try:
+                self._roast_hover_anno.set_visible(False)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        _bbox = getattr(self, '_roast_hover_bbox', None)
+        if _bbox is not None:
+            try:
+                _bbox.set_visible(False)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        for t in (self._roast_hover_texts or []):
+            try:
+                t.set_visible(False)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        if self._roast_hover_bg is not None:
+            try:
+                self._roast_hover_bg.set_visible(False)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        for m in (self._roast_hover_markers or []):
+            try:
+                m.set_visible(False)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        for m in (getattr(self, '_roast_hover_markers_dict', None) or {}).values():
+            try:
+                m.set_visible(False)
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+    def _event_value_at_time(self, timex:list[float], values:list[float], t:float) -> float|None:
+        """Step curve: value at last time point <= t; before first time returns first value."""
+        if not timex or not values or len(timex) != len(values):
+            return None
+        i = bisect.bisect_right(timex, t) - 1
+        if i < 0:
+            return float(values[0])  # before first event: show first step value
+        return float(values[i])
+
+    def _step_value_at(self, timex:list[float], values:list[float], x:float) -> float|None:
+        """Step series value at time x. Robust to len(timex) != len(values):
+        A) len(timex) == len(values) + 1 (e.g. len(values)==len(timex)-1): boundaries in timex, value[i] for [timex[i], timex[i+1]); index = bisect_right(timex, x) - 1 clamped.
+        B) len(timex) == len(values): value at last time <= x.
+        C) len(values) == len(timex) + 1: value[i] for [timex[i-1], timex[i]); i = bisect_right(timex, x) clamped.
+        Otherwise return None."""
+        if not timex or not values:
+            if _ROAST_DEBUG_ENABLED:
+                _roast_debug_log_json({'event': 'controls_values_none', 'reason': 'empty', 'len_timex': len(timex) if timex else 0, 'len_values': len(values) if values else 0, 'i': -1, 'result': None})
+            return None
+        nv = len(values)
+        nt = len(timex)
+        if nt == nv + 1:
+            # per-interval: value[i] applies to [timex[i], timex[i+1])
+            i = bisect.bisect_right(timex, x) - 1
+            i = max(0, min(i, nv - 1))
+            return float(values[i])
+        if nt == nv - 1:
+            # timex one less: value[i] for [timex[i-1], timex[i]); value[0] before timex[0]
+            i = bisect.bisect_right(timex, x)
+            i = max(0, min(i, nv - 1))
+            return float(values[i])
+        if nt == nv:
+            # per-point: value at last time <= x
+            i = bisect.bisect_right(timex, x) - 1
+            if i < 0:
+                return float(values[0])
+            if i >= nv:
+                return float(values[-1])
+            return float(values[i])
+        # #region agent log: ROAST_DEBUG controls_values_none (len_mismatch)
+        if _ROAST_DEBUG_ENABLED:
+            i = bisect.bisect_right(timex, x) - 1
+            _roast_debug_log_json({'event': 'controls_values_none', 'reason': 'len_mismatch', 'len_timex': nt, 'len_values': nv, 'i': i, 'result': None})
+        # #endregion
+        return None
+
+    def _line_value_at(self, line:'Line2D', x:float, use_interp:bool = False) -> float|None:
+        """Sample y at x from a Line2D. If use_interp True (continuous curves), interpolate; else last value at or before x (step-friendly)."""
+        try:
+            xd = line.get_xdata()
+            yd = line.get_ydata()
+            if xd is None or yd is None:
+                return None
+            xarr = numpy.asarray(xd, dtype=float).ravel()
+            yarr = numpy.asarray(yd, dtype=float).ravel()
+            if xarr.size == 0 or yarr.size == 0 or xarr.size != yarr.size:
+                return None
+            if hasattr(yarr, 'filled'):
+                yarr = yarr.filled(numpy.nan)
+            if use_interp and xarr.size > 1:
+                val = float(numpy.interp(x, xarr, yarr))
+                return None if math.isnan(val) else val
+            i = bisect.bisect_right(xarr, x) - 1
+            if i < 0:
+                return float(yarr.flat[0]) if not math.isnan(yarr.flat[0]) else None
+            if i >= yarr.size:
+                return float(yarr.flat[-1]) if not math.isnan(yarr.flat[-1]) else None
+            val = float(yarr.flat[i])
+            return None if math.isnan(val) else val
+        except Exception:  # pylint: disable=broad-except
+            return None
+
+    def _control_line_value_at(self, line:Any, t_sec:float) -> float|None:
+        """Step curve: last value at or before t_sec. Uses E?timex/E?values when available, else line xdata/ydata."""
+        for (lref, tx, vals) in [
+            (self.l_eventtype1dots, self.E1timex, self.E1values),
+            (self.l_eventtype2dots, self.E2timex, self.E2values),
+            (self.l_eventtype3dots, self.E3timex, self.E3values),
+            (self.l_eventtype4dots, self.E4timex, self.E4values),
+        ]:
+            if lref is not None and line is lref and tx is not None and vals is not None:
+                return self._step_value_at(tx, vals, t_sec)
+        return self._line_value_at(line, t_sec, use_interp=False)
+
+    def _roast_hover_curve_raw_key(self, line:Any, is_ror_axis:bool, extra_index:int) -> str:
+        """Return raw key for a curve line: roast_et, roast_bt, roast_ror_et, roast_ror_bt, or extra_N."""
+        if line is getattr(self, 'l_temp1', None):
+            return 'roast_et'
+        if line is getattr(self, 'l_temp2', None):
+            return 'roast_bt'
+        if line is getattr(self, 'l_delta1', None):
+            return 'roast_ror_et'
+        if line is getattr(self, 'l_delta2', None):
+            return 'roast_ror_bt'
+        return f'extra_{extra_index}'
+
+    @staticmethod
+    def _hover_bubble_raw_key_to_config_key(raw_key:str) -> str:
+        """Map raw key to config key for filtering/ordering."""
+        if raw_key in ('roast_ror_et', 'roast_ror_bt'):
+            return 'roast_ror'
+        if raw_key.startswith('extra_'):
+            return 'extra_devices'
+        if raw_key.startswith('control_'):
+            return 'controls'
+        return raw_key
+
+    def build_hover_bubble_lines(self, t_sec:float) -> list[tuple[str, str]]:
+        """Build ordered list of (text, color) for the hover bubble from config and current data.
+        Roast data (time, BT, ET, RoR, extra) first, then controls. Only enabled and ordered by hover_bubble_config.
+        Populates self._hover_line_map (label -> Line2D) so bubble text colors match curve colors via line.get_color()."""
+        self._hover_line_map = {}
+        for ax in (self.ax, self.delta_ax):
+            if ax is None:
+                continue
+            for line in ax.lines:
+                if not line.get_visible():
+                    continue
+                lbl = (line.get_label() or '').strip()
+                if lbl.startswith('_') or getattr(line, '_roast_hover_skip', False) or line is getattr(self, '_roast_hover_line', None):
+                    continue
+                if lbl and lbl != '?':
+                    self._hover_line_map[lbl] = line
+        if self.ax_controls is not None:
+            for line in self.ax_controls.lines:
+                if not line.get_visible():
+                    continue
+                lbl = (line.get_label() or '').strip()
+                if lbl.startswith('_') or line is getattr(self, '_roast_hover_line_controls', None):
+                    continue
+                if lbl and lbl != '?':
+                    self._hover_line_map[lbl] = line
+        line_specs: list[tuple[str, str, str]] = []  # (raw_key, text, color)
+        # Time
+        time_text = f"Time: {stringfromseconds(t_sec)}"
+        time_color = '#e8e8e8'
+        line_specs.append(('time', time_text, time_color))
+
+        # Roast curves from ax and delta_ax (with raw_key per line); if controls missing show only roast lines
+        extra_idx = 0
+        for ax in (self.ax, self.delta_ax):
+            if ax is None:
+                continue
+            is_ror_axis = (ax == self.delta_ax)
+            for line in ax.lines:
+                if not line.get_visible():
+                    continue
+                lbl = (line.get_label() or '').strip()
+                if lbl.startswith('_') or getattr(line, '_roast_hover_skip', False):
+                    continue
+                if line is self._roast_hover_line:
+                    continue
+                if not lbl or lbl == '?':
+                    continue
+                y_val = self._line_value_at(line, t_sec, use_interp=True)
+                if y_val is None or (isinstance(y_val, float) and (math.isnan(y_val) or y_val < -1e6)):
+                    continue
+                try:
+                    line_ref = self._hover_line_map.get(lbl, line)
+                    color = line_ref.get_color() if hasattr(line_ref, 'get_color') else self.palette.get('text', '#333')
+                except Exception:  # pylint: disable=broad-except
+                    color = self.palette.get('text', '#333')
+                if is_ror_axis:
+                    disp = f"{lbl} {float2float(RoRfromCtoF(y_val) if self.mode == 'F' else y_val, 1)}"
+                else:
+                    disp = f"{lbl} {float2float(fromCtoF(y_val) if self.mode == 'F' else y_val, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                raw_key = self._roast_hover_curve_raw_key(line, is_ror_axis, extra_idx)
+                if raw_key.startswith('extra_'):
+                    extra_idx += 1
+                line_specs.append((raw_key, disp, color))
+
+        # Controls from ax_controls
+        if self.ax_controls is not None:
+            for ci, line in enumerate(self.ax_controls.lines):
+                if not line.get_visible():
+                    continue
+                lbl = (line.get_label() or '').strip()
+                if lbl.startswith('_') or line is self._roast_hover_line_controls:
+                    continue
+                y_val = self._control_line_value_at(line, t_sec)
+                if y_val is None or (isinstance(y_val, float) and (math.isnan(y_val) or y_val < -1e6 or y_val > 1e6)):
+                    continue
+                try:
+                    line_ref = self._hover_line_map.get(lbl, line)
+                    ec = line_ref.get_color() if hasattr(line_ref, 'get_color') else self.palette.get('text', '#333')
+                except Exception:  # pylint: disable=broad-except
+                    ec = self.palette.get('text', '#333')
+                pct = max(0, min(100, int(round(float(y_val)))))
+                text = f"{lbl} {pct}%" if lbl else f"{pct}%"
+                line_specs.append((f'control_{ci}', text, ec))
+
+        # Apply config: order and filter
+        config = getattr(self, 'hover_bubble_config', None) or []
+        config_by_key = {entry['key']: entry.get('enabled', True) for entry in config if isinstance(entry, dict) and entry.get('key')}
+        # Default order if no/invalid config
+        default_order = ['time', 'roast_bt', 'roast_et', 'roast_ror', 'extra_devices', 'controls']
+        order = [e['key'] for e in config if isinstance(e, dict) and e.get('key')] or default_order
+        result: list[tuple[str, str]] = []
+        for config_key in order:
+            if not config_by_key.get(config_key, True):
+                continue
+            for raw_key, text, color in line_specs:
+                if self._hover_bubble_raw_key_to_config_key(raw_key) == config_key:
+                    result.append((text, color))
+        if len(result) == 0 and line_specs:
+            result = [(time_text, time_color)]
+        if len(result) == 0:
+            result = [(stringfromseconds(t_sec), time_color)]
+        return result
+
+    def _roast_hover_update(self, t_sec:float, event:'MouseEvent|None' = None) -> None:
+        """Update roast hover: two vertical crosshairs (ax_roast, ax_controls) and one HUD bubble. No second moving bubble."""
+        if self.ax is None:
+            return
+        # Re-ensure artists when vline or bubble is missing (e.g. invalidated as stale after cla/clf)
+        if self._roast_hover_line is None or getattr(self, '_roast_hover_bbox', None) is None:
+            self._roast_hover_ensure_artists()
+        # Update vline only if present; bubble we always try to show (no early return so controls_values_none still shows roast-only bubble)
+        if self._roast_hover_line is not None:
+            ylim = self.ax.get_ylim()
+            self._roast_hover_line.set_data([t_sec, t_sec], [ylim[0], ylim[1]])
+            self._roast_hover_line.set_visible(True)
+        if self._roast_hover_line_controls is not None and self.ax_controls is not None:
+            yc = self.ax_controls.get_ylim()
+            self._roast_hover_line_controls.set_data([t_sec, t_sec], [yc[0], yc[1]])
+            self._roast_hover_line_controls.set_visible(True)
+
+        # Build tooltip lines via configurable build_hover_bubble_lines (order + enabled from hover_bubble_config)
+        parts_with_colors = self.build_hover_bubble_lines(t_sec)
+
+        # Markers: (key, ax, x, y, color) for controls; (key, target_ax, x, y, color, trans) for roast/delta
+        marker_points: list[tuple[str, Any, float, float, str]] = []
+        if self.ax_controls is not None:
+            for ci, line in enumerate(self.ax_controls.lines):
+                if not line.get_visible():
+                    continue
+                lbl = (line.get_label() or '').strip()
+                if lbl.startswith('_') or line is self._roast_hover_line_controls:
+                    continue
+                y_val = self._control_line_value_at(line, t_sec)
+                if y_val is None or (isinstance(y_val, float) and (math.isnan(y_val) or y_val < -1e6 or y_val > 1e6)):
+                    continue
+                try:
+                    ec = line.get_color() if hasattr(line, 'get_color') else self.palette.get('text', '#333')
+                except Exception:  # pylint: disable=broad-except
+                    ec = self.palette.get('text', '#333')
+                marker_points.append((f'control_{ci}', self.ax_controls, t_sec, float(y_val), ec))
+
+        marker_points_with_transform: list[tuple[Any, float, float, str, Any]] = []
+        included_series: list[str] = []
+        extra_idx = 0
+        for ax in (self.ax, self.delta_ax):
+            if ax is None:
+                continue
+            is_ror_axis = (ax == self.delta_ax)
+            for line in ax.lines:
+                if not line.get_visible():
+                    continue
+                lbl = (line.get_label() or '').strip()
+                if lbl.startswith('_') or getattr(line, '_roast_hover_skip', False):
+                    continue
+                if line is self._roast_hover_line:
+                    continue
+                if not lbl or lbl == '?':
+                    continue
+                # Continuous curves (BT/ET/extra/RoR): interpolate by time
+                y_val = self._line_value_at(line, t_sec, use_interp=True)
+                if y_val is None or (isinstance(y_val, float) and (math.isnan(y_val) or y_val < -1e6)):
+                    continue
+                try:
+                    color = line.get_color() if hasattr(line, 'get_color') else self.palette.get('text', '#333')
+                except Exception:  # pylint: disable=broad-except
+                    color = self.palette.get('text', '#333')
+                included_series.append(lbl)
+                raw_key = self._roast_hover_curve_raw_key(line, is_ror_axis, extra_idx)
+                if raw_key.startswith('extra_'):
+                    extra_idx += 1
+                trans = line.get_transform() if hasattr(line, 'get_transform') else ax.transData
+                target_ax = line.axes if hasattr(line, 'axes') else ax
+                marker_points_with_transform.append((raw_key, target_ax, t_sec, float(y_val), color, trans))
+
+        if _ROAST_DEBUG_ENABLED:
+            self._roast_hover_debug_count += 1
+            if self._roast_hover_debug_count == 1:
+                # First hover: required debug log (inaxes, active axis, control series count)
+                try:
+                    _inaxes = event.inaxes if event is not None else None
+                    _inaxes_id = id(_inaxes) if _inaxes is not None else None
+                    _roast_debug_log_json({
+                        'event': 'first_hover',
+                        'x_cursor': t_sec,
+                        'inaxes': str(type(_inaxes).__name__) if _inaxes else None,
+                        'inaxes_id': _inaxes_id,
+                        'active_axis': 'ax' if _inaxes is self.ax else ('delta_ax' if _inaxes is self.delta_ax else ('ax_controls' if _inaxes is self.ax_controls else ('ax_phases' if _inaxes is self.ax_phases else 'other'))),
+                        'control_series_updated': len(marker_points),
+                    })
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                # One-time: write hover_state.json to ROAST_DEBUG_DIR after first hover
+                try:
+                    roast_lines: list[dict[str, Any]] = []
+                    for ax in (self.ax, self.delta_ax):
+                        if ax is None:
+                            continue
+                        for line in ax.lines:
+                            if line.get_visible() and not (line.get_label() or '').strip().startswith('_'):
+                                xd = line.get_xdata()
+                                roast_lines.append({'label': line.get_label(), 'len_xdata': len(xd) if xd is not None else 0})
+                    controls_lines: list[dict[str, Any]] = []
+                    if self.ax_controls is not None:
+                        for line in self.ax_controls.lines:
+                            if line.get_visible() and not (line.get_label() or '').strip().startswith('_'):
+                                xd = line.get_xdata()
+                                controls_lines.append({'label': line.get_label(), 'len_xdata': len(xd) if xd is not None else 0})
+                    state = {
+                        'roast_lines': roast_lines,
+                        'controls_lines': controls_lines,
+                        'markers_count': len(marker_points) + len(marker_points_with_transform),
+                        'bubble_active': True,
+                        't_sec': t_sec,
+                    }
+                    debug_dir = _get_roast_debug_dir()
+                    os.makedirs(debug_dir, exist_ok=True)
+                    with open(os.path.join(debug_dir, 'hover_state.json'), 'w', encoding='utf-8') as f:
+                        json.dump(state, f, indent=2, default=str)
+                    # First hover snapshot (ROAST_DEBUG=1)
+                    try:
+                        _snapshot_path = os.path.join(debug_dir, 'roest_hover_snapshot.png')
+                        self.fig.canvas.draw()
+                        self.fig.savefig(_snapshot_path, dpi=getattr(self, 'dpi', 100),
+                                        facecolor=self.fig.get_facecolor(), bbox_inches=None)
+                        _roast_debug_log_json({'event': 'ROEST_HOVER_SNAPSHOT_SAVED', 'path': _snapshot_path})
+                    except Exception as _snap_e:  # pylint: disable=broad-except
+                        _roast_debug_log_json({'event': 'roest_hover_snapshot_error', 'error': str(_snap_e)})
+                except Exception as _e:  # pylint: disable=broad-except
+                    _roast_debug_log_json({'event': 'hover_state_json_error', 'error': str(_e)})
+            elif self._roast_hover_debug_count % 50 == 0:
+                debug_checkpoint('hover_tooltip', {
+                    'x': t_sec, 'included_series': included_series,
+                    'controls_count': len(marker_points),
+                    'parts_count': len(parts_with_colors),
+                })
+
+        # Single bubble: AnnotationBbox + VPacker at (t_sec, y_cursor). Use fallbacks so we always update
+        # and redraw when blit is not used (roast-like); no early skip when event/inaxes/ydata missing.
+        y_cursor = event.ydata if (event is not None and hasattr(event, 'ydata')) else None
+        active_ax = event.inaxes if (event is not None and hasattr(event, 'inaxes')) else None
+        # Fallback: use main roast axis and mid-y so bubble is always updated and drawn (no early return)
+        if active_ax is None:
+            active_ax = self.ax
+        if active_ax is not None and y_cursor is None:
+            try:
+                ylim = active_ax.get_ylim()
+                y_cursor = (ylim[0] + ylim[1]) / 2.0
+            except Exception:  # pylint: disable=broad-except
+                pass
+        # #region agent log: why bubble block may be skipped
+        _hover_diag_log('bubble_condition_in_update', {
+            'bbox_not_none': self._roast_hover_bbox is not None,
+            'active_ax_not_none': active_ax is not None,
+            'y_cursor': y_cursor,
+            'entered_block': bool(self._roast_hover_bbox is not None and active_ax is not None and y_cursor is not None),
+        }, hypothesis_id='H5', location='canvas.py:_roast_hover_update')
+        # #endregion
+        for t in (self._roast_hover_texts or []):
+            try:
+                t.set_visible(False)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        if self._roast_hover_bg is not None:
+            try:
+                self._roast_hover_bg.set_visible(False)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        if self._roast_hover_anno is not None:
+            try:
+                self._roast_hover_anno.set_visible(False)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        # Always update bubble when it exists; fallback active_ax/y_cursor above so we don't skip (blit not used in roast-like)
+        if self._roast_hover_bbox is not None and active_ax is not None and y_cursor is not None:
+            try:
+                if self._roast_hover_bbox.axes is not active_ax:
+                    self._roast_hover_bbox.remove()
+                    active_ax.add_artist(self._roast_hover_bbox)
+                # Colored lines: each string with its line color (from build_hover_bubble_lines)
+                text_areas = [TextArea(t, textprops=dict(color=c, fontsize='small')) for t, c in parts_with_colors]
+                vpack = VPacker(children=text_areas, pad=0, sep=2)
+                self._roast_hover_bbox.set_child(vpack)
+                self._roast_hover_bbox.xy = (t_sec, y_cursor)
+                # box position is fixed offset (15,15) points from xy via constructor boxcoords='offset points'
+                self._roast_hover_bbox.set_visible(True)
+            except Exception as _bubble_err:  # pylint: disable=broad-except
+                _hover_diag_log('bubble_set_visible_exception', {'error': str(_bubble_err), 'type': type(_bubble_err).__name__}, hypothesis_id='H6', location='canvas.py:_roast_hover_update')
+                if self._roast_hover_bbox is not None:
+                    self._roast_hover_bbox.set_visible(False)
+        elif self._roast_hover_bbox is not None:
+            try:
+                self._roast_hover_bbox.set_visible(False)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        # Roast-like uses no blit; onmove always calls canvas.draw_idle() so bubble is painted
+        if _ROAST_DEBUG_ENABLED:
+            try:
+                bbox_vis = self._roast_hover_bbox.get_visible() if self._roast_hover_bbox is not None and hasattr(self._roast_hover_bbox, 'get_visible') else None
+                vline_vis = self._roast_hover_line.get_visible() if self._roast_hover_line is not None and hasattr(self._roast_hover_line, 'get_visible') else None
+                bbox_xy = getattr(self._roast_hover_bbox, 'xy', None) if self._roast_hover_bbox else None
+                _roast_debug_log_json({
+                    'event': 'hover_visible_after_update',
+                    'bbox_visible': bbox_vis, 'vline_visible': vline_vis, 'bbox_xy': list(bbox_xy) if bbox_xy is not None else None,
+                })
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+        # Markers: update via dict (set_data), create only when missing
+        marker_size_pt = 3
+        md = getattr(self, '_roast_hover_markers_dict', None)
+        if md is None:
+            self._roast_hover_markers_dict = {}
+            md = self._roast_hover_markers_dict
+        active_keys: set[str] = set()
+        for key, ax, x, y, color in marker_points:
+            if ax is None:
+                continue
+            active_keys.add(key)
+            try:
+                xlim, ylim = ax.get_xlim(), ax.get_ylim()
+                xc = max(xlim[0], min(xlim[1], x))
+                yc = max(ylim[0], min(ylim[1], y))
+                if key not in md:
+                    ln, = ax.plot([xc], [yc], 'o', color=color, markersize=marker_size_pt, zorder=25, clip_on=True)
+                    ln.set_animated(False)
+                    md[key] = ln
+                else:
+                    md[key].set_data([xc], [yc])
+                    md[key].set_color(color)
+                md[key].set_visible(True)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        for key, target_ax, x, y, color, trans in marker_points_with_transform:
+            if target_ax is None:
+                continue
+            active_keys.add(key)
+            try:
+                xlim = target_ax.get_xlim()
+                if trans == target_ax.transData:
+                    ylim = target_ax.get_ylim()
+                elif self.delta_ax is not None and trans == self.delta_ax.transData:
+                    ylim = self.delta_ax.get_ylim()
+                else:
+                    ylim = target_ax.get_ylim()
+                xc = max(xlim[0], min(xlim[1], x))
+                yc = max(ylim[0], min(ylim[1], y))
+                if key not in md:
+                    ln, = target_ax.plot([xc], [yc], 'o', color=color, markersize=marker_size_pt, zorder=25, clip_on=True, transform=trans)
+                    ln.set_animated(False)
+                    md[key] = ln
+                else:
+                    md[key].set_data([xc], [yc])
+                    md[key].set_color(color)
+                md[key].set_visible(True)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        for k, m in list(md.items()):
+            if k not in active_keys:
+                try:
+                    m.set_visible(False)
+                except Exception:  # pylint: disable=broad-except
+                    pass
+
+    def _roast_hover_ensure_artists(self) -> None:
+        """Create two vertical crosshairs (ax_roast, ax_controls) and one HUD (texts + bg). No annotation, no events/phases vlines.
+        Rebind: if artist is None or artist.axes != current ax (or ax_controls for controls vline), remove old and recreate on current axes."""
+        if not self.roast_layout_like or self.ax is None:
+            return
+        grid_color = self.palette.get('grid', '#888')
+        _z_vline = 4999
+        _z_bubble = 5000
+        _z_texts = 5001
+        line_kw = dict(color=grid_color, linestyle='-', linewidth=0.8, alpha=0.7, zorder=_z_vline)
+        # Rebind: vline on ax
+        if self._roast_hover_line is not None:
+            ax_cur = getattr(self._roast_hover_line, 'axes', None)
+            if ax_cur is not self.ax:
+                try:
+                    self._roast_hover_line.remove()
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                self._roast_hover_line = None
+                self.roest_vline_roast = None
+        if self._roast_hover_line is None:
+            ylim = self.ax.get_ylim()
+            self._roast_hover_line = self.ax.plot([0, 0], [ylim[0], ylim[1]], **line_kw)[0]
+            self._roast_hover_line.set_label('_roast_vline')
+            self._roast_hover_line.set_visible(False)
+            self._roast_hover_line.set_animated(False)
+            self._roast_hover_line.set_clip_on(False)
+            self.roest_vline_roast = self._roast_hover_line
+            _hover_diag_log('hover_artist_created', {'kind': 'vline_roast', **_hover_diag_artist('vline_roast', self._roast_hover_line)}, hypothesis_id='H1', location='canvas.py:_roast_hover_ensure_artists')
+        # Rebind: texts on ax
+        if self._roast_hover_texts:
+            for t in list(self._roast_hover_texts):
+                ax_cur = getattr(t, 'axes', None)
+                if ax_cur is not self.ax:
+                    try:
+                        t.remove()
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                    self._roast_hover_texts.remove(t)
+        if not self._roast_hover_texts:
+            line_height = 0.028
+            for i in range(30):
+                t = self.ax.text(0.02, 0.98 - i * line_height, '', transform=self.ax.transAxes, fontsize='small',
+                                va='top', ha='left', zorder=_z_texts, clip_on=False)
+                t.set_visible(False)
+                t.set_animated(False)
+                self._roast_hover_texts.append(t)
+        # Rebind: bg on ax
+        if self._roast_hover_bg is not None:
+            ax_cur = getattr(self._roast_hover_bg, 'axes', None)
+            if ax_cur is not self.ax:
+                try:
+                    self._roast_hover_bg.remove()
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                self._roast_hover_bg = None
+        if self._roast_hover_bg is None:
+            self._roast_hover_bg = patches.Rectangle((0.02, 0.5), 0.38, 0.1, transform=self.ax.transAxes,
+                                                    facecolor='#2d2d2d', alpha=0.95, edgecolor='#555', linewidth=1, zorder=_z_bubble, clip_on=False)
+            self.ax.add_patch(self._roast_hover_bg)
+            self._roast_hover_bg.set_visible(False)
+            self._roast_hover_bg.set_animated(False)
+        # Rebind: anno on ax
+        if self._roast_hover_anno is not None:
+            ax_cur = getattr(self._roast_hover_anno, 'axes', None)
+            if ax_cur is not self.ax:
+                try:
+                    self._roast_hover_anno.remove()
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                self._roast_hover_anno = None
+        if self._roast_hover_anno is None:
+            self._roast_hover_anno = self.ax.annotate('', xy=(0, 0), xytext=(0, 0), textcoords='data',
+                                                     fontsize='small', color='#e8e8e8',
+                                                     bbox=dict(boxstyle='round,pad=0.35', facecolor='#2d2d2d', alpha=0.95, edgecolor='#555'),
+                                                     zorder=_z_bubble, clip_on=False)
+            self._roast_hover_anno.set_visible(False)
+            self._roast_hover_anno.set_animated(False)
+        # Rebind: bbox on ax
+        if self._roast_hover_bbox is not None:
+            ax_cur = getattr(self._roast_hover_bbox, 'axes', None)
+            if ax_cur is not self.ax:
+                try:
+                    self._roast_hover_bbox.remove()
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                self._roast_hover_bbox = None
+        if self._roast_hover_bbox is None:
+            _placeholder = VPacker(children=[TextArea('', textprops=dict(fontsize='small', color='#e8e8e8'))], pad=0, sep=2)
+            self._roast_hover_bbox = AnnotationBbox(_placeholder, (0, 0), xycoords='data',
+                                                   xybox=(15, 15), boxcoords='offset points',
+                                                   frameon=True,
+                                                   bboxprops=dict(boxstyle='round,pad=0.35', facecolor='#2d2d2d', alpha=0.95, edgecolor='#555'),
+                                                   zorder=_z_bubble)
+            self.ax.add_artist(self._roast_hover_bbox)
+            self._roast_hover_bbox.set_visible(False)
+            self._roast_hover_bbox.set_animated(False)
+            self._roast_hover_bbox.set_clip_on(False)
+            _hover_diag_log('hover_artist_created', {'kind': 'bubble', **_hover_diag_artist('bubble', self._roast_hover_bbox)}, hypothesis_id='H1', location='canvas.py:_roast_hover_ensure_artists')
+        # Rebind: vline_controls on ax_controls
+        if self._roast_hover_line_controls is not None:
+            ax_cur = getattr(self._roast_hover_line_controls, 'axes', None)
+            if self.ax_controls is None or ax_cur is not self.ax_controls:
+                try:
+                    self._roast_hover_line_controls.remove()
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                self._roast_hover_line_controls = None
+                self.roest_vline_controls = None
+        if self.ax_controls is not None and self._roast_hover_line_controls is None:
+            yc = self.ax_controls.get_ylim()
+            self._roast_hover_line_controls = self.ax_controls.plot([0, 0], [yc[0], yc[1]], **line_kw)[0]
+            self._roast_hover_line_controls.set_label('_roast_vline')
+            self._roast_hover_line_controls.set_visible(False)
+            self._roast_hover_line_controls.set_animated(False)
+            self._roast_hover_line_controls.set_clip_on(False)
+            self.roest_vline_controls = self._roast_hover_line_controls
+            _hover_diag_log('hover_artist_created', {'kind': 'vline_controls', **_hover_diag_artist('vline_controls', self._roast_hover_line_controls)}, hypothesis_id='H1', location='canvas.py:_roast_hover_ensure_artists')
+        if _ROAST_DEBUG_ENABLED:
+            try:
+                ax_id = id(self.ax) if self.ax else None
+                ax_cid = id(self.ax_controls) if self.ax_controls else None
+                bbox_ax_id = id(getattr(self._roast_hover_bbox, 'axes', None)) if self._roast_hover_bbox else None
+                vline_ax_id = id(getattr(self._roast_hover_line, 'axes', None)) if self._roast_hover_line else None
+                vline_c_ax_id = id(getattr(self._roast_hover_line_controls, 'axes', None)) if self._roast_hover_line_controls else None
+                _roast_debug_log_json({
+                    'event': 'hover_artists_axes',
+                    'ax_id': ax_id, 'ax_controls_id': ax_cid,
+                    'bbox_axes_id': bbox_ax_id, 'vline_axes_id': vline_ax_id, 'vline_controls_axes_id': vline_c_ax_id,
+                })
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+    def _ensure_roest_hover_initialized(self) -> None:
+        """Create roest hover artists on first redraw with data so hover works without toggling layout."""
+        if not self.roast_layout_like or self.ax is None:
+            return
+        if len(self.timex) == 0:
+            return
+        if self._roast_hover_line is not None:
+            return
+        self._roast_hover_ensure_artists()
+
+    def ensure_hover_connected(self) -> None:
+        """(Re)connect motion_notify_event to onmove and re-ensure hover artists. Call after redraw and after closing any settings dialog."""
+        # Reconnect motion_notify only if missing (e.g. after fig.clf); avoid duplicate handlers
+        try:
+            cbs = getattr(self.fig.canvas.callbacks, 'callbacks', None) or {}
+            motion = cbs.get('motion_notify_event', {})
+            if self.onmove_cid is not None and self.onmove_cid in motion:
+                pass  # already connected
+            else:
+                if self.onmove_cid is not None:
+                    try:
+                        self.fig.canvas.mpl_disconnect(self.onmove_cid)
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                self.onmove_cid = None
+        except Exception:  # pylint: disable=broad-except
+            self.onmove_cid = None
+        if self.onmove_cid is None:
+            self.onmove_cid = self.fig.canvas.mpl_connect('motion_notify_event', self.onmove)
+        # Roast-like: after any dialog close or redraw, re-bind hover to current axes (invalidate stale, ensure artists)
+        if self.roast_layout_like and self.ax is not None:
+            self._roast_hover_invalidate_stale()
+            self._roast_hover_ensure_artists()
+            # Roast-like: single motion handler only — disconnect any other motion_notify_event callbacks
+            # so old hover/crosshair cannot overwrite bubble via restore_region/blit or hide artists
+            try:
+                cbs = getattr(self.fig.canvas.callbacks, 'callbacks', None) or {}
+                motion = cbs.get('motion_notify_event', {})
+                for cid in list(motion.keys()):
+                    if cid != self.onmove_cid:
+                        try:
+                            self.fig.canvas.mpl_disconnect(cid)
+                        except Exception:  # pylint: disable=broad-except
+                            pass
+            except Exception:  # pylint: disable=broad-except
+                pass
+        # #region agent log: callbacks after ensure_hover_connected
+        try:
+            cbs = getattr(self.fig.canvas.callbacks, 'callbacks', None) or {}
+            motion_ids = list(cbs.get('motion_notify_event', {}).keys())
+            draw_ids = list(cbs.get('draw_event', {}).keys())
+            _hover_diag_log('ensure_hover_connected_callbacks', {
+                'motion_notify_ids': motion_ids, 'draw_event_ids': draw_ids, 'onmove_cid': self.onmove_cid,
+                'motion_count': len(motion_ids), 'draw_count': len(draw_ids),
+            }, hypothesis_id='H4', location='canvas.py:ensure_hover_connected')
+        except Exception:  # pylint: disable=broad-except
+            pass
+        # #endregion
+        if _ROAST_DEBUG_ENABLED:
+            try:
+                cbs = getattr(self.fig.canvas.callbacks, 'callbacks', None) or {}
+                motion_ids = list(cbs.get('motion_notify_event', {}).keys())
+                draw_ids = list(cbs.get('draw_event', {}).keys())
+                payload = {'event': 'ensure_hover_connected_after', 'motion_notify_ids': motion_ids, 'draw_event_ids': draw_ids, 'onmove_cid': self.onmove_cid}
+                _roast_debug_log_json(payload)
+                _cursor_debug_log('ensure_hover_connected callbacks', payload, location='canvas.py:ensure_hover_connected')
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+    def _roast_hover_time_bounds(self) -> tuple[float, float] | None:
+        """Return (t_min, t_max) from all curves (timex, E1-E4, extra) so cursor is limited to data range. None if no data."""
+        t_min_candidates: list[float] = []
+        t_max_candidates: list[float] = []
+        if self.timex:
+            t_min_candidates.append(min(self.timex))
+            t_max_candidates.append(max(self.timex))
+        for tx in (self.E1timex, self.E2timex, self.E3timex, self.E4timex):
+            if tx:
+                t_min_candidates.append(min(tx))
+                t_max_candidates.append(max(tx))
+        for dev_times in (getattr(self, 'extractimex1', None) or [], getattr(self, 'extractimex2', None) or []):
+            if not isinstance(dev_times, list):
+                continue
+            for tx in dev_times:
+                if tx and isinstance(tx, (list, tuple)) and len(tx) > 0:
+                    t_min_candidates.append(min(tx))
+                    t_max_candidates.append(max(tx))
+        extratimex = getattr(self, 'extratimex', None) or []
+        for tx in extratimex:
+            if tx and isinstance(tx, (list, tuple)) and len(tx) > 0:
+                t_min_candidates.append(min(tx))
+                t_max_candidates.append(max(tx))
+        if not t_min_candidates or not t_max_candidates:
+            return None
+        return (min(t_min_candidates), max(t_max_candidates))
+
     def onmove(self, event:'Event') -> None:
+        # #region agent log: ROAST_DEBUG motion_notify_event callbacks (once)
+        if _ROAST_DEBUG_ENABLED and not self._roast_debug_motion_logged:
+            self._roast_debug_motion_logged = True
+            try:
+                cbs = getattr(self.fig.canvas.callbacks, 'callbacks', None) or {}
+                motion = cbs.get('motion_notify_event', {})
+                cids = list(motion.keys())
+                _roast_debug_log_json({'event': 'motion_notify_event_callbacks', 'count': len(cids), 'callback_ids': cids})
+            except Exception:  # pylint: disable=broad-except
+                pass
+        # #endregion
+        if getattr(self.aw, 'debug_render', False):
+            self.hover_times.append(libtime.perf_counter())
+            if len(self.hover_times) >= 50:
+                span = self.hover_times[-1] - self.hover_times[0]
+                rate = (len(self.hover_times) - 1) / span if span > 0 else 0
+                _log.info('hover_updates_per_sec=%.1f (main canvas)', rate)
+                self.hover_times.clear()
         if isinstance(event, MouseEvent):
             if all(x is None for x in [self.foreground_event_ind, self.foreground_event_pos, self.foreground_event_pick_position,
                 self.background_event_ind, self.background_event_pos, self.background_event_pick_position]):
+                # No drag: show unified crosshair on ax + ax_events + ax_controls + ax_phases when mouse over any of them
+                if self.roast_layout_like and self.ax is not None:
+                    in_roast_axes = (event.inaxes in (self.ax, self.ax_events, self.ax_controls, self.ax_phases)
+                                    if event.inaxes is not None else False)
+                    if not in_roast_axes:
+                        self._roast_hover_hide()
+                        self.fig.canvas.draw_idle()
+                        return
+                    # Invalidate stale artists (e.g. after cla/clf from redraw); then ensure hover artists exist
+                    self._roast_hover_invalidate_stale()
+                    if self._roast_hover_line is None:
+                        self._ensure_roest_hover_initialized()
+                    t_sec = event.xdata
+                    if t_sec is None or t_sec in (float('-inf'), float('inf')):
+                        self._roast_hover_hide()
+                        self.fig.canvas.draw_idle()
+                        return
+                    # Limit cursor to actual curve/event range (no sliding past start/end of data)
+                    bounds = self._roast_hover_time_bounds()
+                    if bounds is not None:
+                        t_min, t_max = bounds
+                        t_sec = max(t_min, min(t_max, t_sec))
+                    now = libtime.perf_counter()
+                    if now - self._roast_hover_last_update < 1/60:
+                        return  # throttle ~60 Hz
+                    self._roast_hover_last_update = now
+                    # #region agent log: on_motion before update
+                    _bubble = getattr(self, '_roast_hover_bbox', None)
+                    _ax_contains = self.ax.contains(event)[0] if self.ax is not None else None
+                    _hover_diag_log('on_motion_before_update', {
+                        'xdata': event.xdata, 'ydata': event.ydata, 't_sec': t_sec,
+                        'ax_contains_event': _ax_contains,
+                        'bubble_visible_before': _bubble.get_visible() if _bubble is not None and hasattr(_bubble, 'get_visible') else None,
+                        'bubble_is_none': _bubble is None,
+                    }, hypothesis_id='H2', location='canvas.py:onmove')
+                    # #endregion
+                    try:
+                        self._roast_hover_update(t_sec, event)
+                    except Exception as _e:  # pylint: disable=broad-except
+                        write_debug_artifact(f'[canvas._roast_hover_update] exception: {_e}')
+                    # #region agent log: on_motion after update, draw_idle called
+                    _bubble2 = getattr(self, '_roast_hover_bbox', None)
+                    _hover_diag_log('on_motion_after_update', {
+                        'bubble_visible_after': _bubble2.get_visible() if _bubble2 is not None and hasattr(_bubble2, 'get_visible') else None,
+                        'draw_idle_called': True, 'draw_artist_called': False, 'blit_called': False,
+                    }, hypothesis_id='H2', location='canvas.py:onmove')
+                    # #endregion
+                    self.fig.canvas.draw_idle()
+                    return
+                # Classic mode: single motion handler drives classic crosshair from here
+                if self.crossmarker:
+                    self._roast_hover_hide()
+                    self.drawcross(event)
+                    return
                 return
+            # Drag: hide roast hover so it does not interfere with drag
+            self._roast_hover_hide()
             if self.foreground_event_ind is not None:
                 self.clear_last_picked_event_selection() # clear the last picked event index, if any, remembered for the delete event by backspace action
             if event.inaxes is None:
@@ -4475,6 +5769,10 @@ class tgraphcanvas(QObject):
                 self.l_timeline.set_xdata([self.timeclock.elapsedMilli()] if self.aw.sample_loop_running else [self.aw.time_stopped])
                 self.l_timeline.set_visible(self.flagstart)
                 self.ax.draw_artist(self.l_timeline)
+            # Phases bar: update without full redraw() — only x/width/text/visible of persistent artists, then draw_idle
+            if self.ax_phases is not None and self._phases_bar_rects is not None:
+                self._update_phases_bar()
+                self.fig.canvas.draw_idle()
             if self.ETprojectFlag:
                 if self.l_ETprojection is not None and self.ETcurve:
                     # show only if either the DeltaBT curve or LCD is shown (allows to suppress projects for cases where ET channel is used for other signals)
@@ -4591,8 +5889,13 @@ class tgraphcanvas(QObject):
         #   we are 20sec after CHARGE
         #   len(BT) > 4
         # BT[-5] <= BT[-4] and BT[-5] <= BT[-3] and BT[-5] <= BT[-2] and BT[-5] <= BT[-1] and BT[-5] < BT[-1]
-        if seconds_since_CHARGE > 20 and not self.afterTP and len(self.temp2) > 3 and (self.temp2[-5] <= self.temp2[-4]) and (self.temp2[-5] <= self.temp2[-3]) and (self.temp2[-5] <= self.temp2[-2]) and (self.temp2[-5] <= self.temp2[-1]) and (self.temp2[-5] < self.temp2[-1]):
-            self.afterTP = True
+        # NOTE: temp2 elements can be None, so use safe comparisons
+        if seconds_since_CHARGE > 20 and not self.afterTP and len(self.temp2) > 4:
+            bt5, bt4, bt3, bt2, bt1 = self.temp2[-5], self.temp2[-4], self.temp2[-3], self.temp2[-2], self.temp2[-1]
+            # All values must be valid numbers for comparison
+            if all(_is_valid_number(v) for v in (bt5, bt4, bt3, bt2, bt1)):
+                if bt5 <= bt4 and bt5 <= bt3 and bt5 <= bt2 and bt5 <= bt1 and bt5 < bt1:
+                    self.afterTP = True
         return self.afterTP
 
     # sample devices at interval self.delay milliseconds.
@@ -4893,6 +6196,16 @@ class tgraphcanvas(QObject):
                             self.l_temp1.set_data(sample_ctimex1, numpy.array(sample_ctemp1))
                         if self.BTcurve and self.l_temp2 is not None:
                             self.l_temp2.set_data(sample_ctimex2, numpy.array(sample_ctemp2))
+                        # Roast-like: update control line artists in realtime during recording (same as temps)
+                        if self.roast_layout_like and self.ax_controls is not None and self.eventsGraphflag in {2, 3, 4}:
+                            for ldots, tx, vals in [
+                                (self.l_eventtype1dots, self.E1timex, self.E1values),
+                                (self.l_eventtype2dots, self.E2timex, self.E2values),
+                                (self.l_eventtype3dots, self.E3timex, self.E3values),
+                                (self.l_eventtype4dots, self.E4timex, self.E4values),
+                            ]:
+                                if ldots is not None and len(tx) > 0 and len(tx) == len(vals):
+                                    ldots.set_data(tx, numpy.clip(numpy.array(vals), 0, 100))
 
                     #NOTE: the following is no longer restricted to self.aw.pidcontrol.pidActive==True
                     # as now the software PID is also update while the PID is off (if configured).
@@ -5629,31 +6942,39 @@ class tgraphcanvas(QObject):
                                 #### lock shared resources to ensure that no other redraw is interfering with this one here #####
                                 self.profileDataSemaphore.acquire(1)
                                 try:
-                                    if self.ax_background is not None:
+                                    # Roast-like: skip blit so hover artists (vline, bubble, markers) are drawn; they use draw_idle()
+                                    if self.ax_background is not None and not getattr(self, 'roast_layout_like', False):
+                                        # #region agent log: ROAST_DEBUG restore_region
+                                        if _ROAST_DEBUG_ENABLED:
+                                            _cursor_debug_log('updategraphics_restore_region', {
+                                                'event': 'restore_region', 'axis_corresponds_to': 'fig',
+                                                'note': 'restoring ax_background (captured from fig.bbox in doUpdate)'
+                                            }, hypothesis_id='blit_diag', location='canvas.py:updategraphics')
+                                        # #endregion
                                         self.fig.canvas.restore_region(self.ax_background) # type: ignore[attr-defined]
 
-                                        # draw delta lines
+                                        # draw delta lines (on their owning axes: ax or delta_ax)
 
                                         if self.swapdeltalcds:
                                             if self.DeltaETflag and self.l_delta1 is not None:
                                                 try:
-                                                    self.ax.draw_artist(self.l_delta1)
+                                                    self.l_delta1.axes.draw_artist(self.l_delta1)
                                                 except Exception as e: # pylint: disable=broad-except
                                                     _log.exception(e)
                                             if self.DeltaBTflag and self.l_delta2 is not None:
                                                 try:
-                                                    self.ax.draw_artist(self.l_delta2)
+                                                    self.l_delta2.axes.draw_artist(self.l_delta2)
                                                 except Exception as e: # pylint: disable=broad-except
                                                     _log.exception(e)
                                         else:
                                             if self.DeltaBTflag and self.l_delta2 is not None:
                                                 try:
-                                                    self.ax.draw_artist(self.l_delta2)
+                                                    self.l_delta2.axes.draw_artist(self.l_delta2)
                                                 except Exception as e: # pylint: disable=broad-except
                                                     _log.exception(e)
                                             if self.DeltaETflag and self.l_delta1 is not None:
                                                 try:
-                                                    self.ax.draw_artist(self.l_delta1)
+                                                    self.l_delta1.axes.draw_artist(self.l_delta1)
                                                 except Exception as e: # pylint: disable=broad-except
                                                     _log.exception(e)
 
@@ -5717,6 +7038,13 @@ class tgraphcanvas(QObject):
                                             _log.exception(e)
                                         axfig = self.ax.get_figure()
                                         if axfig is not None:
+                                            # #region agent log: ROAST_DEBUG blit live path
+                                            if _ROAST_DEBUG_ENABLED:
+                                                _cursor_debug_log('updategraphics_blit', {
+                                                    'bbox_px': _roast_debug_bbox_px(axfig.bbox),
+                                                    'axis_corresponds_to': 'fig', 'path': 'live_update'
+                                                }, hypothesis_id='blit_diag', location='canvas.py:updategraphics')
+                                            # #endregion
                                             self.fig.canvas.blit(axfig.bbox)
 
                                     else:
@@ -7564,6 +8892,129 @@ class tgraphcanvas(QObject):
                 return -1
         return -1
 
+    def _phases_bar_segments(self) -> list[tuple[float, float, str]]:
+        """Compute phase bar segments (x_left, x_right, palette_key). Empty if not applicable."""
+        if self.ax_phases is None or not self.roast_layout_like or len(self.timex) == 0:
+            return []
+        if self.timeindex[0] < 0 or self.timeindex[0] >= len(self.timex):
+            return []
+        t0 = float(self.timex[self.timeindex[0]])
+        if self.timeindex[6] > 0 and self.timeindex[6] < len(self.timex):
+            t_end = float(self.timex[self.timeindex[6]])
+        else:
+            t_end = float(self.timex[-1])
+        if t_end <= t0:
+            return []
+        t_yellow: float | None = float(self.timex[self.timeindex[1]]) if (self.timeindex[1] > 0 and self.timeindex[1] < len(self.timex)) else None
+        t_fcs: float | None = float(self.timex[self.timeindex[2]]) if (self.timeindex[2] > 0 and self.timeindex[2] < len(self.timex)) else None
+        t1 = t_yellow if (t_yellow is not None and t0 < t_yellow < t_end) else None
+        t2 = t_fcs if (t_fcs is not None and t0 < t_fcs < t_end) else None
+        if t1 is not None and t2 is not None and t1 < t2:
+            return [(t0, t1, 'rect1'), (t1, t2, 'rect2'), (t2, t_end, 'rect3')]
+        if t2 is not None:
+            return [(t0, t2, 'rect1'), (t2, t_end, 'rect3')]
+        if t1 is not None:
+            return [(t0, t1, 'rect1'), (t1, t_end, 'rect2')]
+        return [(t0, t_end, 'rect1')]
+
+    def _ensure_phases_bar_artists(self) -> None:
+        """Create once 3 Rectangle + 3 Text on ax_phases; clear refs when layout is not Roast-like."""
+        if self.ax_phases is None or not self.roast_layout_like:
+            self._phases_bar_rects = None
+            self._phases_bar_texts = None
+            return
+        if self._phases_bar_rects is not None and len(self._phases_bar_rects) == 3:
+            return
+        self._phases_bar_rects = []
+        self._phases_bar_texts = []
+        prop_bold = _safe_bold_fontproperties(size=10.0)  # never raises
+        for _ in range(3):
+            rect = patches.Rectangle(
+                (0, 0), 0, 1,
+                facecolor=self.palette['rect1'], edgecolor='none',
+                transform=self.ax_phases.transData,
+                zorder=1,  # rectangles at base layer
+            )
+            self.ax_phases.add_patch(rect)
+            self._phases_bar_rects.append(rect)
+            # Use high-contrast color so labels are readable on green/orange/brown segments
+            phase_label_color = '#1a1a1a'  # dark gray, readable on all phase colors
+            t = self.ax_phases.text(
+                0, 0.5, '', ha='center', va='center', fontproperties=prop_bold,
+                color=phase_label_color,
+                clip_on=False,  # ensure labels are never clipped
+                zorder=10,  # labels above rectangles
+            )
+            # Thin stroke so text stands out on any segment background
+            t.set_path_effects([PathEffects.withStroke(linewidth=1.4, foreground='white')])
+            self._phases_bar_texts.append(t)
+        self.ax_phases.set_axisbelow(False)
+
+    def _update_phases_bar(self) -> None:
+        """Update only x/width/text/visible of the 3 rects and 3 texts (no new artists)."""
+        segments = self._phases_bar_segments()
+        total_dur = (segments[-1][1] - segments[0][0]) if segments else 0.0
+        show_labels = bool(self.phases_bar_show_labels)
+        prop_bold = _safe_bold_fontproperties(size=10.0)  # never raises
+        if self._phases_bar_rects is not None and self._phases_bar_texts is not None:
+            for i in range(3):
+                if self._phases_bar_texts[i] is not None:
+                    self._phases_bar_texts[i].set_fontproperties(prop_bold)
+                r = self._phases_bar_rects[i]
+                t = self._phases_bar_texts[i]
+                if i < len(segments):
+                    x_left, x_right, color_key = segments[i]
+                    w = x_right - x_left
+                    r.set_xy((x_left, 0))
+                    r.set_width(w)
+                    r.set_facecolor(self.palette[color_key])
+                    r.set_visible(True)
+                    dur = w
+                    pct = (dur / total_dur * 100.0) if total_dur else 0.0
+                    t.set_position(((x_left + x_right) / 2, 0.5))
+                    t.set_text(f'{stringfromseconds(dur, leadingzero=False)} ({pct:.1f}%)')
+                    t.set_color('#1a1a1a')  # keep high-contrast on colored segments
+                    t.set_visible(show_labels)
+                else:
+                    r.set_visible(False)
+                    t.set_visible(False)
+
+    def _draw_phases_bar(self) -> None:
+        """Draw Drying / Maillard / Development phase bar on ax_phases (Roast-like layout).
+        Uses persistent 3 rects + 3 texts; create once then only update x/width/text/visible.
+        Must not raise: redraw continues after this and draws main chart curves.
+        """
+        if self.ax_phases is None or not self.roast_layout_like:
+            return
+        try:
+            self._ensure_phases_bar_artists()
+            self._update_phases_bar()
+        except Exception:  # pylint: disable=broad-except
+            _log.exception('_draw_phases_bar')
+        # #region agent log: phases text diagnostic (H-D)
+        if _ROAST_DEBUG_ENABLED and self._phases_bar_texts:
+            t0 = self._phases_bar_texts[0]
+            _cursor_debug_log('phases_text_after_update', {
+                'axes_id': id(t0.axes) if hasattr(t0, 'axes') and t0.axes else None,
+                'ax_phases_id': id(self.ax_phases) if self.ax_phases else None,
+                'same_axes': t0.axes is self.ax_phases if hasattr(t0, 'axes') else None,
+                'visible': t0.get_visible(), 'clip_on': t0.get_clip_on(),
+                'position': list(t0.get_position()), 'zorder': t0.get_zorder(),
+            }, hypothesis_id='D', location='canvas.py:_draw_phases_bar')
+        # #endregion
+        # #region agent log: PHASES_BAR_DRAWN - concise summary
+        if _ROAST_DEBUG_ENABLED:
+            segments = self._phases_bar_segments()
+            visible_labels = sum(1 for t in (self._phases_bar_texts or []) if t and t.get_visible())
+            visible_rects = sum(1 for r in (self._phases_bar_rects or []) if r and r.get_visible())
+            debug_checkpoint('PHASES_BAR_DRAWN', {
+                'segments': len(segments),
+                'labels_visible': f'{visible_labels}/{len(self._phases_bar_texts) if self._phases_bar_texts else 0}',
+                'rects_visible': f'{visible_rects}/{len(self._phases_bar_rects) if self._phases_bar_rects else 0}',
+                'show_labels': self.phases_bar_show_labels,
+            })
+        # #endregion
+
     #format X axis labels
     def xaxistosm(self,redraw:bool = True, min_time:float|None = None, max_time:float|None = None, set_xlim:bool = True) -> None:
         if self.ax is None:
@@ -7588,6 +9039,10 @@ class tgraphcanvas(QObject):
 
             if set_xlim:
                 self.ax.set_xlim(startofx,endtime)
+                if self.ax_controls is not None:
+                    self.ax_controls.set_xlim(startofx,endtime)
+                if self.ax_phases is not None:
+                    self.ax_phases.set_xlim(startofx,endtime)
 
             if self.xgrid != 0:
 
@@ -8623,8 +10078,8 @@ class tgraphcanvas(QObject):
                         time_temp_annos = self.annotate(temp[tidx],st1,timex[tidx],stemp[tidx],ystep_up,ystep_down,e,a,draggable,3+anno_key_offset)
                         if time_temp_annos is not None:
                             anno_artists += time_temp_annos
-                        #add a water mark if FCs
-                        if timeindex[2] and not timeindex2 and self.watermarksflag:
+                        #add a water mark if FCs (Classic only; Roast-like has phases on ax_phases strip)
+                        if timeindex[2] and not timeindex2 and self.watermarksflag and not self.roast_layout_like:
                             self.ax.axvspan(
                                     timex[timeindex[2]],
                                     timex[tidx],
@@ -8659,8 +10114,8 @@ class tgraphcanvas(QObject):
                         time_temp_annos = self.annotate(temp[tidx],st1,timex[tidx],stemp[tidx],ystep_up,ystep_down,e,a,draggable,5+anno_key_offset)
                         if time_temp_annos is not None:
                             anno_artists += time_temp_annos
-                        #do water mark if SCs
-                        if timeindex[4] and not timeindex2 and self.watermarksflag:
+                        #do water mark if SCs (Classic only; Roast-like has phases on ax_phases strip)
+                        if timeindex[4] and not timeindex2 and self.watermarksflag and not self.roast_layout_like:
                             self.ax.axvspan(
                                 timex[timeindex[4]],
                                 timex[tidx],
@@ -8700,8 +10155,8 @@ class tgraphcanvas(QObject):
                         fake_anno = self.annotate(-1, '', 0,0,0,0)
                         if fake_anno is not None:
                             anno_artists += fake_anno
-                    #do water mark if FCs, but no FCe nor SCs nor SCe
-                    if timeindex[2] and not timeindex[3] and not timeindex[4] and not timeindex[5] and not timeindex2 and self.watermarksflag:
+                    #do water mark if FCs, but no FCe nor SCs nor SCe (Classic only; Roast-like has phases on ax_phases strip)
+                    if timeindex[2] and not timeindex[3] and not timeindex[4] and not timeindex[5] and not timeindex2 and self.watermarksflag and not self.roast_layout_like:
                         fc_artist = self.ax.axvspan(
                             timex[timeindex[2]],
                             timex[tidx],
@@ -8709,8 +10164,8 @@ class tgraphcanvas(QObject):
                             alpha=0.2,
                             path_effects=[])
                         fc_artist.set_in_layout(False) # remove title from tight_layout calculation
-                    #do water mark if SCs, but no SCe
-                    if timeindex[4] and not timeindex[5] and not timeindex2 and self.watermarksflag:
+                    #do water mark if SCs, but no SCe (Classic only; Roast-like has phases on ax_phases strip)
+                    if timeindex[4] and not timeindex[5] and not timeindex2 and self.watermarksflag and not self.roast_layout_like:
                         sc_artist = self.ax.axvspan(
                             timex[timeindex[4]],
                             timex[tidx],
@@ -8730,7 +10185,8 @@ class tgraphcanvas(QObject):
                     # as the right most data value of the axis in self.ax.get_xlim()[1] is only correctly set after the initial draw,
                     # we simply set it to twice as wide and trust that the clipping will cut of the part not within the axis system
                     endidx = 2*max(self.timex[-1],self.endofx,self.ax.get_xlim()[0],self.ax.get_xlim()[1])
-                    if timex[tidx] < endidx and self.watermarksflag:
+                    # COOL watermark (Classic only; Roast-like has phases on ax_phases strip)
+                    if timex[tidx] < endidx and self.watermarksflag and not self.roast_layout_like:
                         cool_mark = self.ax.axvspan(
                             timex[tidx],endidx,
                             facecolor=self.palette['rect4'],
@@ -8982,8 +10438,9 @@ class tgraphcanvas(QObject):
         fontprop_medium = self.aw.mpl_fontproperties.copy()
         fontprop_medium.set_size('medium')
         self.xlabel_text = xlabel
-        if self.ax is not None:
-            self.xlabel_artist = self.ax.set_xlabel(xlabel,color = self.palette['xlabel'],
+        _ax_label = self.ax_phases if (self.ax_phases is not None) else self.ax
+        if _ax_label is not None:
+            self.xlabel_artist = _ax_label.set_xlabel(xlabel,color = self.palette['xlabel'],
                 fontsize='medium',
                 fontfamily=fontprop_medium.get_family())
         if self.xlabel_artist is not None:
@@ -9112,18 +10569,21 @@ class tgraphcanvas(QObject):
                 pass
             # don't draw -1:
             temp = numpy.ma.masked_where(temp == -1, temp)
+            et_color = self.palette.get('et') or '#1f77b4'  # fallback so ET is never invisible
             self.l_temp1, = self.ax.plot(
                 self.timex,
                 temp, # pyright:ignore[reportUnknownArgumentType]
                 markersize=self.ETmarkersize,
                 marker=self.ETmarker,
                 sketch_params=None,
-                path_effects = self.line_path_effects(self.glow, self.patheffects, self.aw.light_background_p, self.ETlinewidth, self.palette['et']),
+                path_effects = self.line_path_effects(self.glow, self.patheffects, self.aw.light_background_p, self.ETlinewidth, et_color),
                 linewidth=self.ETlinewidth,
                 linestyle=self.ETlinestyle,
                 drawstyle=self.ETdrawstyle,
-                color=self.palette['et'],
+                color=et_color,
+                zorder=10,
                 label=self.aw.arabicReshape(QApplication.translate('Label', 'ET')))
+            self.l_temp1.set_gid('ET')
 
     def drawBT(self, temp:'npt.NDArray[numpy.double]') -> None:
         if self.BTcurve and self.ax is not None:
@@ -9134,18 +10594,21 @@ class tgraphcanvas(QObject):
                 pass
             # don't draw -1:
             temp = numpy.ma.masked_where(temp == -1, temp)
+            bt_color = self.palette.get('bt') or '#d62728'  # fallback so BT is never invisible
             self.l_temp2, = self.ax.plot(
                 self.timex,
                 temp, # pyright:ignore[reportUnknownArgumentType]
                 markersize=self.BTmarkersize,
                 marker=self.BTmarker,
                 sketch_params=None,
-                path_effects = self.line_path_effects(self.glow, self.patheffects, self.aw.light_background_p, self.BTlinewidth, self.palette['bt']),
+                path_effects = self.line_path_effects(self.glow, self.patheffects, self.aw.light_background_p, self.BTlinewidth, bt_color),
                 linewidth = self.BTlinewidth,
                 linestyle = self.BTlinestyle,
                 drawstyle = self.BTdrawstyle,
-                color = self.palette['bt'],
+                color = bt_color,
+                zorder=10,
                 label = self.aw.arabicReshape(QApplication.translate('Label', 'BT')))
+            self.l_temp2.set_gid('BT')
 
     def drawDeltaET(self, trans:Transform, start:int, end:int) -> None:
         if self.DeltaETflag and self.ax is not None:
@@ -9162,19 +10625,22 @@ class tgraphcanvas(QObject):
             else:
                 timex = numpy.array([])
                 delta1 = numpy.array([])
-            self.l_delta1, = self.ax.plot(
-                    timex,
-                    delta1,
-                    transform=trans,
-                    markersize=self.ETdeltamarkersize,
-                    marker=self.ETdeltamarker,
-                    sketch_params=None,
-                    path_effects = self.line_path_effects(self.glow, self.patheffects, self.aw.light_background_p, self.ETdeltalinewidth, self.palette['deltaet']),
-                    linewidth=self.ETdeltalinewidth,
-                    linestyle=self.ETdeltalinestyle,
-                    drawstyle=self.ETdeltadrawstyle,
-                    color=self.palette['deltaet'],
-                    label=self.aw.arabicReshape(f"{deltaLabelUTF8}{QApplication.translate('Label', 'ET')}"))
+            _plot_kw = dict(
+                markersize=self.ETdeltamarkersize,
+                marker=self.ETdeltamarker,
+                sketch_params=None,
+                path_effects=self.line_path_effects(self.glow, self.patheffects, self.aw.light_background_p, self.ETdeltalinewidth, self.palette['deltaet']),
+                linewidth=self.ETdeltalinewidth,
+                linestyle=self.ETdeltalinestyle,
+                drawstyle=self.ETdeltadrawstyle,
+                color=self.palette['deltaet'],
+                zorder=10,
+                label=self.aw.arabicReshape(f"{deltaLabelUTF8}{QApplication.translate('Label', 'ET')}"))
+            # RoR must stay on self.ax with delta_ax.transData: ax is in front of delta_ax (set_zorder), so plotting on delta_ax would hide RoR behind ax
+            self.l_delta1, = self.ax.plot(timex, delta1, transform=trans, **_plot_kw)
+            self.l_delta1.set_gid('RoR_ET')
+            # RoR uses delta_ax.transData on self.ax; ensure visible (clip to axes rect, not data bounds)
+            self.l_delta1.set_clip_path(self.ax.patch)
 
     def drawDeltaBT(self, trans:Transform, start:int, end:int) -> None:
         if self.DeltaBTflag and self.ax is not None:
@@ -9189,19 +10655,21 @@ class tgraphcanvas(QObject):
             else:
                 timex = numpy.array([])
                 delta2 = numpy.array([])
-            self.l_delta2, = self.ax.plot(
-                    timex,
-                    delta2,
-                    transform=trans,
-                    markersize=self.BTdeltamarkersize,
-                    marker=self.BTdeltamarker,
-                    sketch_params=None,
-                    path_effects = self.line_path_effects(self.glow, self.patheffects, self.aw.light_background_p, self.BTdeltalinewidth, self.palette['deltabt']),
-                    linewidth=self.BTdeltalinewidth,
-                    linestyle=self.BTdeltalinestyle,
-                    drawstyle=self.BTdeltadrawstyle,
-                    color=self.palette['deltabt'],
-                    label=self.aw.arabicReshape(f"{deltaLabelUTF8}{QApplication.translate('Label', 'BT')}"))
+            _plot_kw = dict(
+                markersize=self.BTdeltamarkersize,
+                marker=self.BTdeltamarker,
+                sketch_params=None,
+                path_effects=self.line_path_effects(self.glow, self.patheffects, self.aw.light_background_p, self.BTdeltalinewidth, self.palette['deltabt']),
+                linewidth=self.BTdeltalinewidth,
+                linestyle=self.BTdeltalinestyle,
+                drawstyle=self.BTdeltadrawstyle,
+                color=self.palette['deltabt'],
+                zorder=10,
+                label=self.aw.arabicReshape(f"{deltaLabelUTF8}{QApplication.translate('Label', 'BT')}"))
+            # RoR must stay on self.ax with delta_ax.transData: ax is in front of delta_ax (set_zorder), so plotting on delta_ax would hide RoR behind ax
+            self.l_delta2, = self.ax.plot(timex, delta2, transform=trans, **_plot_kw)
+            self.l_delta2.set_gid('RoR_BT')
+            self.l_delta2.set_clip_path(self.ax.patch)
 
     # if profileDataSemaphore lock cannot be fetched the redraw is not performed
     def lazyredraw(self, recomputeAllDeltas:bool = True, smooth:bool = True) -> None:
@@ -9363,6 +10831,512 @@ class tgraphcanvas(QObject):
         return f"{self.__dijkstra_to_ascii(self.roastertype_setup)} {(render_weight(self.roastersize_setup, 1, weight_units.index(self.weight[2])) if self.roastersize_setup>0 else '')}"
 
 
+    def redraw_roast_like(self, recomputeAllDeltas:bool = True, re_smooth_foreground:bool = True, takelock:bool = True, forceRenewAxis:bool = False, re_smooth_background:bool = False) -> None:
+        """Hard-isolated Roast-like renderer. Only draws: roast curves (BT/ET/RoR + extras), Roest event markers,
+        control step-curves on ax_controls, phases bar on ax_phases. No classic event labels, no place_annotations,
+        no eventsGraphflag bar/step+/combo. Uses full draw_idle() (no blit). Axes are cleared once at start only."""
+        if takelock:
+            self.profileDataSemaphore.acquire(1)
+        try:
+            self.updateBackgroundSemaphore.acquire(1)
+            try:
+                decay_smoothing_p = (not self.optimalSmoothing) or self.flagon
+                scale = 1 if self.graphstyle == 1 else 0
+                length = 700
+                randomness = 12
+                rcParams['path.sketch'] = (scale, length, randomness)
+                if self.ax is None or self.delta_ax is None:
+                    forceRenewAxis = True
+                has_roast_like_axes = (self.ax_events is not None and self.ax_controls is not None and self.ax_phases is not None)
+                if self.roast_layout_like != has_roast_like_axes:
+                    forceRenewAxis = True
+                xlabel_alpha_color = to_hex(to_rgba(self.palette['xlabel'], 0.47), keep_alpha=True)
+                ylabel_alpha_color = to_hex(to_rgba(self.palette['ylabel'], 0.47), keep_alpha=True)
+                if forceRenewAxis or self.ax is None:
+                    self.fig.clf()
+                    self.onmove_cid = None  # ensure_hover_connected() will reconnect
+                    self.ax_background = None
+                    self._roast_hover_line = None
+                    self.roest_vline_roast = None
+                    self.roest_vline_controls = None
+                    self._roast_hover_anno = None
+                    self._roast_hover_bbox = None
+                    self._roast_hover_line_events = None
+                    self._roast_hover_line_controls = None
+                    self._roast_hover_line_phases = None
+                    self._roast_hover_texts = []
+                    self._roast_hover_bg = None
+                    for m in (self._roast_hover_markers or []):
+                        try:
+                            m.remove()
+                        except Exception:  # pylint: disable=broad-except
+                            pass
+                    self._roast_hover_markers = []
+                    for m in (self._roast_hover_markers_dict or {}).values():
+                        try:
+                            m.remove()
+                        except Exception:  # pylint: disable=broad-except
+                            pass
+                    self._roast_hover_markers_dict = {}
+                    gs = GridSpec(4, 1, height_ratios=[10, 0.5, 2.5, 0.7], hspace=0.02,
+                                  left=0.067, right=0.925, top=0.93, bottom=0.08)
+                    self.ax = self.fig.add_subplot(gs[0], facecolor=self.palette['background'])
+                    self.ax_events = self.fig.add_subplot(gs[1], sharex=self.ax, facecolor='none')
+                    self.ax_controls = self.fig.add_subplot(gs[2], sharex=self.ax, facecolor=self.palette['background'])
+                    self.ax_phases = self.fig.add_subplot(gs[3], sharex=self.ax, facecolor=self.palette['background'])
+                    self.ax.set_zorder(5)
+                    self.ax_events.set_zorder(3)
+                    self.ax_events.set_facecolor('none')
+                    self.ax_events.patch.set_alpha(0.0)
+                    self.ax_events.patch.set_visible(False)
+                    self.ax_events.set_frame_on(False)
+                    self.ax_controls.set_zorder(1)
+                    self.ax_phases.set_zorder(1)
+                    self.fig.set_layout_engine('none')
+                    self.ax.set_autoscale_on(False)
+                    self.delta_ax = self.ax.twinx()
+                    self.delta_ax.set_facecolor('none')
+                    self.delta_ax.patch.set_visible(False)
+                    self.delta_ax.patch.set_alpha(0.0)
+                    self.delta_ax.set_zorder(3)
+                if self.ax is not None:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        self.ax.clear()
+                    # clear() removed hover artists from axes; invalidate refs so _roast_hover_ensure_artists() recreates them
+                    self._roast_hover_line = None
+                    self.roest_vline_roast = None
+                    self._roast_hover_anno = None
+                    self._roast_hover_bbox = None
+                    self._roast_hover_texts = []
+                    self._roast_hover_bg = None
+                    for m in (self._roast_hover_markers or []):
+                        try:
+                            m.remove()
+                        except Exception:  # pylint: disable=broad-except
+                            pass
+                    self._roast_hover_markers = []
+                    for m in (getattr(self, '_roast_hover_markers_dict', None) or {}).values():
+                        try:
+                            m.remove()
+                        except Exception:  # pylint: disable=broad-except
+                            pass
+                    self._roast_hover_markers_dict = {}
+                    self.ax.set_facecolor(self.palette['background'])
+                    self.ax.set_ylim(self.ylimit_min, self.ylimit)
+                if self.delta_ax is not None:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        self.delta_ax.clear()
+                    self.delta_ax.set_facecolor('none')
+                    self.delta_ax.patch.set_visible(False)
+                    self.delta_ax.patch.set_alpha(0.0)
+                if self.ax_events is not None:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        self.ax_events.clear()
+                    self.ax_events.set_facecolor('none')
+                    self.ax_events.patch.set_alpha(0.0)
+                    self.ax_events.patch.set_visible(False)
+                    self.ax_events.set_frame_on(False)
+                    self.ax_events.set_ylim(0, 1)
+                    self.ax_events.set_yticks([])
+                    self.ax_events.tick_params(axis='both', which='both', left=False, right=False, labelleft=False, labelright=False, bottom=False, labelbottom=False)
+                    self.ax_events.set_zorder(3)
+                if self.ax_controls is not None:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        self.ax_controls.clear()
+                    self._roast_hover_line_controls = None
+                    self.roest_vline_controls = None
+                    self.ax_controls.set_facecolor(self.palette['background'])
+                    self.ax_controls.set_ylim(0, 100)
+                    self.ax_controls.set_ylabel(QApplication.translate('Label', '% / RPM'), color=self.palette['ylabel'], fontsize='small')
+                    self.ax_controls.tick_params(axis='x', labelbottom=False)
+                    self.ax_controls.yaxis.tick_left()
+                    self.ax_controls.yaxis.set_label_position('left')
+                    self.ax_controls.yaxis.set_major_locator(ticker.MultipleLocator(10))
+                    self.ax_controls.yaxis.set_minor_locator(ticker.MultipleLocator(5))
+                    self.ax_controls.grid(True, which='major', axis='y', color=self.palette.get('grid', '#888'),
+                                        linestyle=self.gridstyles[self.gridlinestyle], linewidth=self.gridthickness, alpha=self.gridalpha)
+                    self.ax_controls.grid(True, which='minor', axis='y', color=self.palette.get('grid', '#888'),
+                                        linestyle=':', linewidth=max(0.5, self.gridthickness * 0.6), alpha=self.gridalpha * 0.7)
+                if self.ax_phases is not None:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        self.ax_phases.clear()
+                    self._phases_bar_rects = None
+                    self._phases_bar_texts = None
+                    self.ax_phases.set_facecolor(self.palette['background'])
+                    self.ax_phases.set_ylim(0, 1)
+                    self.ax_phases.set_yticks([])
+                    self.ax_phases.tick_params(axis='y', which='both', left=False, labelleft=False)
+                    self.ax_phases.tick_params(axis='x', which='both', labelbottom=True)
+                rcParams['xtick.color'] = xlabel_alpha_color
+                rcParams['ytick.color'] = ylabel_alpha_color
+                prop = self.aw.mpl_fontproperties.copy()
+                prop.set_size('small')
+                if self.flagstart or self.ygrid == 0:
+                    self.ax.set_ylabel('')
+                else:
+                    self.ax.set_ylabel(self.mode, color=self.palette['ylabel'], rotation=0, labelpad=10, fontsize='medium', fontfamily=prop.get_family())
+                self.set_xlabel(self.default_xlabel_text())
+                two_ax_mode = self.twoAxisMode()
+                self.ax.tick_params(axis='x', which='both', bottom=True, top=False, direction='inout', labelbottom=False)
+                self.ax.tick_params(axis='y', which='both', right=False, bottom=True, top=False, direction='inout', labelbottom=True)
+                self.ax.fmt_ydata = self.fmt_data
+                self.ax.fmt_xdata = self.fmt_timedata
+                if self.delta_ax is not None:
+                    self.ax.set_zorder(5)
+                self.ax.patch.set_visible(True)
+                if self.delta_ax is not None:
+                    self.delta_ax.fmt_ydata = self.fmt_data
+                    self.delta_ax.fmt_xdata = self.fmt_timedata
+                    self.delta_ax.yaxis.set_label_position('right')
+                    if two_ax_mode:
+                        self.delta_ax.tick_params(axis='y', which='both', left=False, bottom=False, top=False, direction='inout', labelright=True, labelleft=False, labelbottom=False)
+                        if self.flagstart or self.zgrid == 0:
+                            self.delta_ax.set_ylabel('')
+                        else:
+                            self.delta_ax.set_ylabel(f"{self.mode}{self.aw.arabicReshape('/min')}", color=self.palette['ylabel'], fontsize='medium', fontfamily=prop.get_family())
+                    else:
+                        self.delta_ax.patch.set_visible(False)
+                        self.delta_ax.tick_params(axis='y', which='both', right=False, labelright=False)
+                self.ax.spines['top'].set_color(xlabel_alpha_color)
+                self.ax.spines['bottom'].set_color(xlabel_alpha_color)
+                self.ax.spines['left'].set_color(ylabel_alpha_color)
+                self.ax.spines['right'].set_color(ylabel_alpha_color)
+                if self.delta_ax is not None:
+                    self.delta_ax.set_frame_on(False)
+                if self.temp_grid or self.time_grid:
+                    grid_axis = 'both' if (self.temp_grid and self.time_grid) else ('y' if self.temp_grid else 'x')
+                    self.ax.grid(True, axis=grid_axis, color=self.palette['grid'], linestyle=self.gridstyles[self.gridlinestyle],
+                                linewidth=self.gridthickness, alpha=self.gridalpha, sketch_params=0, path_effects=[])
+                self.smoothETBT(re_smooth_foreground, recomputeAllDeltas, decay_smoothing_p)
+                charge_idx = 0
+                if self.timeindex[0] > -1:
+                    charge_idx = self.timeindex[0]
+                drop_idx = len(self.timex) - 1
+                if self.timeindex[6] > 0:
+                    drop_idx = self.timeindex[6]
+                self.xaxistosm(redraw=False)
+                self._draw_phases_bar()
+                for vl in self.l_roest_vlines:
+                    try:
+                        vl.remove()
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                for la in self.l_roest_labels:
+                    try:
+                        la.remove()
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                self.l_roest_vlines = []
+                self.l_roest_labels = []
+                roest_events: list[tuple[float, str, int]] = []
+                if len(self.timex) > 0:
+                    main_labels = [
+                        (0, QApplication.translate('Label', 'CHARGE')),
+                        (-1, 'TP'),
+                        (1, QApplication.translate('Label', 'DRY')),
+                        (2, 'FCs'), (3, 'FCe'), (4, 'SCs'), (5, 'SCe'),
+                        (6, QApplication.translate('Label', 'DROP')),
+                    ]
+                    for idx, label in main_labels:
+                        if idx == -1:
+                            tp_idx = self.aw.findTP()
+                            if tp_idx is not None and tp_idx >= 0 and len(self.timex) > tp_idx:
+                                roest_events.append((self.timex[tp_idx], label, 0))
+                        elif idx == 0:
+                            if self.timeindex[0] >= 0 and len(self.timex) > self.timeindex[0]:
+                                roest_events.append((self.timex[self.timeindex[0]], label, 0))
+                        elif self.timeindex[idx] and len(self.timex) > self.timeindex[idx]:
+                            roest_events.append((self.timex[self.timeindex[idx]], label, 0))
+                if roest_events and self.ax is not None:
+                    roest_events_sorted = sorted(roest_events, key=lambda x: (x[0], x[2]))
+                    _trans_top = self.ax.get_xaxis_transform()
+                    _prev_t: float | None = None
+                    _lane = 0
+                    _y_lanes = [0.88, 0.73]
+                    for t, label, _ in roest_events_sorted:
+                        if _prev_t is not None and abs(t - _prev_t) < 15:
+                            _lane = 1 - _lane
+                        else:
+                            _lane = 0
+                        _prev_t = t
+                        vl = self.ax.axvline(t, color='#444444', linestyle=':', linewidth=1, alpha=0.6, zorder=50)
+                        self.l_roest_vlines.append(vl)
+                        if self.ax_controls is not None:
+                            vl_ctrl = self.ax_controls.axvline(t, color='#444444', linestyle=':', linewidth=1, alpha=0.5, zorder=50)
+                            self.l_roest_vlines.append(vl_ctrl)
+                        bt_temp = None
+                        if len(self.timex) > 0 and len(self.temp2) == len(self.timex):
+                            _idx = min(range(len(self.timex)), key=lambda i: abs(self.timex[i] - t))
+                            if self.temp2[_idx] is not None and self.temp2[_idx] > 0:
+                                bt_temp = self.temp2[_idx]
+                        _y_top = _y_lanes[_lane]
+                        label_fontprop = _safe_regular_fontproperties(size=9.0)
+                        temp_fontprop = _safe_bold_fontproperties(size=9.0)
+                        if bt_temp is not None:
+                            temp_str = f'{bt_temp:.1f}°{self.mode}'
+                            label_str = self.aw.arabicReshape(label)
+                            name_text = self.ax.text(t, _y_top, label_str, transform=_trans_top, rotation=90, va='top', ha='center',
+                                                    fontproperties=label_fontprop, color=self.palette['text'], zorder=70, clip_on=False)
+                            name_text.set_in_layout(False)
+                            self.l_roest_labels.append(name_text)
+                            _label_offset = len(label_str) * 0.014 + 0.025
+                            _y_temp = _y_top - _label_offset
+                            temp_text = self.ax.text(t, _y_temp, temp_str, transform=_trans_top, rotation=90, va='top', ha='center',
+                                                    fontproperties=temp_fontprop, color=self.palette['text'], zorder=70, clip_on=False)
+                            temp_text.set_in_layout(False)
+                            self.l_roest_labels.append(temp_text)
+                        else:
+                            name_text = self.ax.text(t, _y_top, self.aw.arabicReshape(label), transform=_trans_top, rotation=90, va='top', ha='center',
+                                                    fontproperties=label_fontprop, color=self.palette['text'], zorder=70, clip_on=False)
+                            name_text.set_in_layout(False)
+                            self.l_roest_labels.append(name_text)
+                self.E1timex, self.E2timex, self.E3timex, self.E4timex = [], [], [], []
+                self.E1values, self.E2values, self.E3values, self.E4values = [], [], [], []
+                E1values_pct: list[float] = []
+                E2values_pct: list[float] = []
+                E3values_pct: list[float] = []
+                E4values_pct: list[float] = []
+                E1_CHARGE_pct: float | None = None
+                E2_CHARGE_pct: float | None = None
+                E3_CHARGE_pct: float | None = None
+                E4_CHARGE_pct: float | None = None
+                E1_last, E2_last, E3_last, E4_last = 0, 0, 0, 0
+                Nevents = len(self.specialevents)
+                for i in range(Nevents):
+                    if not (len(self.specialevents) > i and len(self.specialeventstype) > i and len(self.specialeventsvalue) > i and len(self.timex) > self.specialevents[i]):
+                        continue
+                    pos = max(0, int(round((self.specialeventsvalue[i] - 1) * 10)))
+                    txx = self.timex[self.specialevents[i]]
+                    skip_event = not self.flagstart and ((not self.foregroundShowFullflag and (not self.autotimex or self.autotimexMode == 0) and self.timeindex[0] > -1 and txx < self.timex[self.timeindex[0]]) or
+                                (not self.foregroundShowFullflag and self.timeindex[6] > 0 and txx > self.timex[self.timeindex[6]]))
+                    try:
+                        if self.specialeventstype[i] == 0 and self.showEtypes[0]:
+                            if skip_event:
+                                if self.timeindex[0] > -1 and txx < self.timex[self.timeindex[0]]:
+                                    E1_CHARGE_pct = float(pos)
+                                continue
+                            self.E1timex.append(txx)
+                            self.E1values.append(float(pos))
+                            E1values_pct.append(float(pos))
+                            E1_last = i
+                        elif self.specialeventstype[i] == 1 and self.showEtypes[1]:
+                            if skip_event:
+                                if self.timeindex[0] > -1 and txx < self.timex[self.timeindex[0]]:
+                                    E2_CHARGE_pct = float(pos)
+                                continue
+                            self.E2timex.append(txx)
+                            self.E2values.append(float(pos))
+                            E2values_pct.append(float(pos))
+                            E2_last = i
+                        elif self.specialeventstype[i] == 2 and self.showEtypes[2]:
+                            if skip_event:
+                                if self.timeindex[0] > -1 and txx < self.timex[self.timeindex[0]]:
+                                    E3_CHARGE_pct = float(pos)
+                                continue
+                            self.E3timex.append(txx)
+                            self.E3values.append(float(pos))
+                            E3values_pct.append(float(pos))
+                            E3_last = i
+                        elif self.specialeventstype[i] == 3 and self.showEtypes[3]:
+                            if skip_event:
+                                if self.timeindex[0] > -1 and txx < self.timex[self.timeindex[0]]:
+                                    E4_CHARGE_pct = float(pos)
+                                continue
+                            self.E4timex.append(txx)
+                            self.E4values.append(float(pos))
+                            E4values_pct.append(float(pos))
+                            E4_last = i
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                if self.timeindex[6] > 0 and self.extendevents:
+                    for _list, _pct, _last in [(self.E1timex, E1values_pct, E1_last), (self.E2timex, E2values_pct, E2_last),
+                                               (self.E3timex, E3values_pct, E3_last), (self.E4timex, E4values_pct, E4_last)]:
+                        if _list and _pct and _last >= 0 and len(self.specialevents) > _last and self.specialevents[_last] < len(self.timex) and self.timex[self.timeindex[6]] > self.timex[self.specialevents[_last]]:
+                            _list.append(self.timex[self.timeindex[6]])
+                            _pct.append(_pct[-1])
+                def _step_line(Ex: list[float], Ey_pct: list[float], E_CHARGE_pct: float | None, E_last: int, color: Any, marker: Any, markersize: float, linewidth: float, alpha: float, label: str, etype_idx: int) -> None:
+                    if self.ax_controls is None or etype_idx < 0:
+                        return
+                    if len(Ex) > 0 and len(Ey_pct) == len(Ex):
+                        y_pct = list(Ey_pct)
+                        if E_CHARGE_pct is not None and len(y_pct) > 1 and y_pct[0] != E_CHARGE_pct:
+                            x_ = [self.timex[self.timeindex[0]]] + list(Ex)
+                            y_pct = [E_CHARGE_pct] + y_pct
+                        else:
+                            x_ = list(Ex)
+                        _y_arr = numpy.clip(numpy.array(y_pct, dtype=float), 0, 100)
+                        setattr(self, f'l_eventtype{etype_idx+1}dots', self.ax_controls.plot(numpy.array(x_), _y_arr, color=color, marker=marker, markersize=markersize,
+                            linestyle='-', drawstyle='steps-post', linewidth=linewidth, alpha=alpha, label=label, clip_on=True)[0])
+                    else:
+                        setattr(self, f'l_eventtype{etype_idx+1}dots', self.ax_controls.plot([None], [numpy.nan], color=color, linestyle='-', drawstyle='steps-post', linewidth=linewidth, alpha=alpha, label=label, clip_on=True)[0])
+                if self.ax_controls is not None:
+                    _step_line(self.E1timex, E1values_pct, E1_CHARGE_pct, E1_last, self.EvalueColor[0], self.EvalueMarker[0], self.EvalueMarkerSize[0],
+                              self.Evaluelinethickness[0], self.Evaluealpha[0], self.etypesf(0), 0)
+                    _step_line(self.E2timex, E2values_pct, E2_CHARGE_pct, E2_last, self.EvalueColor[1], self.EvalueMarker[1], self.EvalueMarkerSize[1],
+                              self.Evaluelinethickness[1], self.Evaluealpha[1], self.etypesf(1), 1)
+                    _step_line(self.E3timex, E3values_pct, E3_CHARGE_pct, E3_last, self.EvalueColor[2], self.EvalueMarker[2], self.EvalueMarkerSize[2],
+                              self.Evaluelinethickness[2], self.Evaluealpha[2], self.etypesf(2), 2)
+                    _step_line(self.E4timex, E4values_pct, E4_CHARGE_pct, E4_last, self.EvalueColor[3], self.EvalueMarker[3], self.EvalueMarkerSize[3],
+                              self.Evaluelinethickness[3], self.Evaluealpha[3], self.etypesf(3), 3)
+                    for _i in range(4):
+                        _ln = getattr(self, f'l_eventtype{_i+1}dots', None)
+                        if _ln is not None:
+                            _ln.set_gid(self.etypesf(_i))
+                trans = self.delta_ax.transData if self.delta_ax is not None else None
+                if trans is not None and (self.DeltaETflag or self.DeltaBTflag):
+                    if (not self.flagon or self.timeindex[0] > 1) and len(self.timex) == len(self.delta1) and len(self.timex) == len(self.delta2) and len(self.timex) > charge_idx + 2:
+                        skip = max(2, min(20, int(round(5000 / self.delay))))
+                        skip2 = max(2, int(round(skip / 2)))
+                        if self.swapdeltalcds:
+                            self.drawDeltaET(trans, charge_idx + skip, drop_idx - skip2)
+                            self.drawDeltaBT(trans, charge_idx + skip, drop_idx - skip2)
+                        else:
+                            self.drawDeltaBT(trans, charge_idx + skip, drop_idx - skip2)
+                            self.drawDeltaET(trans, charge_idx + skip, drop_idx - skip2)
+                    else:
+                        self.drawDeltaET(trans, 0, 0)
+                        self.drawDeltaBT(trans, 0, 0)
+                if self.delta_ax is not None:
+                    self.delta_ax.set_yticks([])
+                    if two_ax_mode:
+                        self.aw.autoAdjustAxis(timex=False)
+                        self.delta_ax.set_ylim(self.zlimit_min, self.zlimit)
+                        if self.zgrid > 0:
+                            major_locator = ticker.MultipleLocator(self.zgrid)
+                            self.delta_ax.yaxis.set_major_locator(major_locator)
+                extraname1_subst = list(self.extraname1) if self.extraname1 else []
+                extraname2_subst = list(self.extraname2) if self.extraname2 else []
+                for i in range(len(self.extratimex)):
+                    if i < len(extraname1_subst):
+                        extraname1_subst[i] = self.device_name_subst(extraname1_subst[i])
+                    if i < len(extraname2_subst):
+                        extraname2_subst[i] = self.device_name_subst(extraname2_subst[i])
+                for l in self.extratemp1lines + self.extratemp2lines:
+                    try:
+                        if l is not None:
+                            l.remove()
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                self.extratemp1lines, self.extratemp2lines = [], []
+                nrdevices = min(len(self.extratimex or []), len(self.extratemp1 or []), len(self.extradevicecolor1 or []), len(self.extraname1 or []),
+                               len(self.extratemp2 or []), len(self.extradevicecolor2 or []), len(self.extraname2 or []))
+                timexi_lin = None
+                for i in range(nrdevices):
+                    if self.extratimex and i < len(self.extratimex) and self.extratimex[i] and len(self.extratimex[i]) > 1:
+                        timexi_lin = numpy.linspace(self.extratimex[i][0], self.extratimex[i][-1], len(self.extratimex[i]))
+                    try:
+                        if self.aw.extraCurveVisibility1[i] and i < len(self.extratimex) and i < len(self.extrastemp1):
+                            if self.aw.extraDelta1[i] and self.delta_ax is not None:
+                                trans_extra = self.delta_ax.transData
+                            else:
+                                trans_extra = self.ax.transData
+                            if not self.flagon and (re_smooth_foreground or len(self.extrastemp1[i]) != len(self.extratimex[i])):
+                                self.extrastemp1[i] = self.smooth_list(self.extratimex[i], fill_gaps(self.extratemp1[i]) if self.interpolateDropsflag else self.extratemp1[i],
+                                    window_len=self.curvefilter, decay_smoothing=decay_smoothing_p, a_lin=timexi_lin, delta=False).tolist()
+                            elif len(self.extrastemp1[i]) != len(self.extratimex[i]):
+                                self.extrastemp1[i] = fill_gaps(self.extratemp1[i]) if self.interpolateDropsflag else self.extratemp1[i]
+                            visible_extratemp1 = numpy.array(self.extrastemp1[i], dtype=numpy.double)
+                            if not self.flagstart and not self.foregroundShowFullflag and (not self.autotimex or self.autotimexMode == 0) and len(self.extrastemp1[i]) > 0:
+                                visible_extratemp1 = numpy.concatenate((numpy.full(charge_idx, numpy.nan, dtype=numpy.double), numpy.array(self.extrastemp1[i][charge_idx:drop_idx+1]),
+                                    numpy.full(len(self.extratimex[i]) - drop_idx - 1, numpy.nan, dtype=numpy.double)))
+                            ln1, = self.ax.plot(self.extratimex[i], visible_extratemp1, transform=trans_extra, color=self.extradevicecolor1[i],
+                                path_effects=self.line_path_effects(self.glow, self.patheffects, self.aw.light_background_p, self.extralinewidths1[i], self.extradevicecolor1[i]),
+                                markersize=self.extramarkersizes1[i], marker=self.extramarkers1[i], linewidth=self.extralinewidths1[i], linestyle=self.extralinestyles1[i],
+                                drawstyle=self.extradrawstyles1[i], label=extraname1_subst[i] if i < len(extraname1_subst) else '')
+                            ln1.set_gid(extraname1_subst[i] if i < len(extraname1_subst) else f'extra1_{i}')
+                            self.extratemp1lines.append(ln1)
+                        if self.aw.extraCurveVisibility2[i] and i < len(self.extratimex) and i < len(self.extrastemp2):
+                            if self.aw.extraDelta2[i] and self.delta_ax is not None:
+                                trans_extra = self.delta_ax.transData
+                            else:
+                                trans_extra = self.ax.transData
+                            if not self.flagon and (re_smooth_foreground or len(self.extrastemp2[i]) != len(self.extratimex[i])):
+                                self.extrastemp2[i] = self.smooth_list(self.extratimex[i], fill_gaps(self.extratemp2[i]) if self.interpolateDropsflag else self.extratemp2[i],
+                                    window_len=self.curvefilter, decay_smoothing=decay_smoothing_p, a_lin=timexi_lin, delta=False).tolist()
+                            elif len(self.extrastemp2[i]) != len(self.extratimex[i]):
+                                self.extrastemp2[i] = fill_gaps(self.extratemp2[i]) if self.interpolateDropsflag else self.extratemp2[i]
+                            visible_extratemp2 = numpy.array(self.extrastemp2[i], dtype=numpy.double)
+                            if not self.flagstart and not self.foregroundShowFullflag and (not self.autotimex or self.autotimexMode == 0) and len(self.extrastemp2[i]) > 0:
+                                visible_extratemp2 = numpy.concatenate((numpy.full(charge_idx, numpy.nan, dtype=numpy.double), numpy.array(self.extrastemp2[i][charge_idx:drop_idx+1]),
+                                    numpy.full(len(self.extratimex[i]) - drop_idx - 1, numpy.nan, dtype=numpy.double)))
+                            ln2, = self.ax.plot(self.extratimex[i], visible_extratemp2, transform=trans_extra, color=self.extradevicecolor2[i],
+                                path_effects=self.line_path_effects(self.glow, self.patheffects, self.aw.light_background_p, self.extralinewidths2[i], self.extradevicecolor2[i]),
+                                markersize=self.extramarkersizes2[i], marker=self.extramarkers2[i], linewidth=self.extralinewidths2[i], linestyle=self.extralinestyles2[i],
+                                drawstyle=self.extradrawstyles2[i], label=extraname2_subst[i] if i < len(extraname2_subst) else '')
+                            ln2.set_gid(extraname2_subst[i] if i < len(extraname2_subst) else f'extra2_{i}')
+                            self.extratemp2lines.append(ln2)
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                if not self.flagstart and not self.foregroundShowFullflag and (not self.autotimex or self.autotimexMode == 0):
+                    visible_et = numpy.concatenate((numpy.full(charge_idx, numpy.nan, dtype=numpy.double), numpy.array(self.stemp1[charge_idx:drop_idx+1]),
+                        numpy.full(len(self.timex) - drop_idx - 1, numpy.nan, dtype=numpy.double)))
+                    visible_bt = numpy.concatenate((numpy.full(charge_idx, numpy.nan, dtype=numpy.double), numpy.array(self.stemp2[charge_idx:drop_idx+1]),
+                        numpy.full(len(self.timex) - drop_idx - 1, numpy.nan, dtype=numpy.double)))
+                elif not self.flagstart and not self.foregroundShowFullflag and self.autotimex and self.autotimexMode != 0:
+                    visible_et = numpy.concatenate((numpy.array(self.stemp1[0:drop_idx+1]), numpy.full(len(self.timex) - drop_idx - 1, numpy.nan, dtype=numpy.double)))
+                    visible_bt = numpy.concatenate((numpy.array(self.stemp2[0:drop_idx+1]), numpy.full(len(self.timex) - drop_idx - 1, numpy.nan, dtype=numpy.double)))
+                else:
+                    visible_et = numpy.array(self.stemp1)
+                    visible_bt = numpy.array(self.stemp2)
+                if self.swaplcds:
+                    self.drawET(visible_et)
+                    self.drawBT(visible_bt)
+                else:
+                    self.drawBT(visible_bt)
+                    self.drawET(visible_et)
+                for _line in (self.l_temp1, self.l_temp2, self.l_delta1, self.l_delta2):
+                    if _line is not None:
+                        _line.set_zorder(10)
+                        _line.set_visible(True)
+                self._roast_hover_invalidate_stale()
+                self._roast_hover_ensure_artists()
+                self.ensure_hover_connected()
+                self.fig.canvas.draw_idle()
+                # ROAST_DEBUG: redraw log (vline/bubble/markers) + roast_like_render.png
+                if _ROAST_DEBUG_ENABLED:
+                    try:
+                        vl_r = getattr(self, 'roest_vline_roast', None)
+                        vl_c = getattr(self, 'roest_vline_controls', None)
+                        md = getattr(self, '_roast_hover_markers_dict', None) or {}
+                        roast_keys = [k for k in md if not k.startswith('control_')]
+                        ctrl_keys = [k for k in md if k.startswith('control_')]
+                        _roast_debug_log_json({
+                            'event': 'redraw_roast_like',
+                            'vline_roast': vl_r is not None,
+                            'vline_roast_visible': getattr(vl_r, 'get_visible', lambda: False)() if vl_r else False,
+                            'vline_controls': vl_c is not None,
+                            'vline_controls_visible': getattr(vl_c, 'get_visible', lambda: False)() if vl_c else False,
+                            'bubble_artist': (self._roast_hover_anno is not None or self._roast_hover_bbox is not None),
+                            'marker_count_roast': len(roast_keys),
+                            'marker_count_controls': len(ctrl_keys),
+                            'x_cursor': None,
+                        })
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                    try:
+                        import pathlib
+                        _log_dir = pathlib.Path(_get_roast_debug_dir())
+                        _log_dir.mkdir(parents=True, exist_ok=True)
+                        _snapshot_path = _log_dir / 'roast_like_render.png'
+                        self.fig.canvas.draw()
+                        self.fig.savefig(str(_snapshot_path),
+                                        dpi=getattr(self, 'dpi', 100),
+                                        facecolor=self.fig.get_facecolor(),
+                                        bbox_inches=None)
+                        debug_checkpoint('RENDER_SNAPSHOT_SAVED', {'path': str(_snapshot_path)})
+                    except Exception as _snap_ex:  # pylint: disable=broad-except
+                        debug_checkpoint('RENDER_SNAPSHOT_ERROR', {'error': str(_snap_ex)})
+            finally:
+                self.updateBackgroundSemaphore.release()
+        finally:
+            if takelock:
+                self.profileDataSemaphore.release()
+
     #Redraws data
     # if recomputeAllDeltas, the delta arrays and if smooth the smoothed line arrays are recomputed (incl. those of the background curves)
     # re_smooth_foreground: the foreground curves (incl. extras) will be re-smoothed if called while not recording. During recording foreground will never be smoothed here.
@@ -9379,8 +11353,22 @@ class tgraphcanvas(QObject):
             self.aw.comparator.redraw()
             if self.aw.qpc is not None:
                 self.aw.qpc.redraw_phases()
+        elif self.roast_layout_like:
+            # Hard-isolated Roast-like renderer: no classic branches, no place_annotations, no eventsGraphflag variants.
+            self.redraw_roast_like(
+                recomputeAllDeltas=recomputeAllDeltas,
+                re_smooth_foreground=re_smooth_foreground,
+                takelock=takelock,
+                forceRenewAxis=forceRenewAxis,
+                re_smooth_background=re_smooth_background,
+            )
+            return
         else:
             titleB = ''
+            _debug_render = getattr(self.aw, 'debug_render', False)
+            _t0 = libtime.perf_counter() if _debug_render else None
+            # Stage tracking for debugging - will be captured in exception handler
+            _redraw_stage: str = 'ENTRY'
             try:
                 #### lock shared resources   ####
                 if takelock:
@@ -9388,6 +11376,7 @@ class tgraphcanvas(QObject):
                 try:
                     # prevent interleaving of updateBackground() and redraw()
                     self.updateBackgroundSemaphore.acquire(1)
+                    _redraw_stage = 'LOCK_ACQUIRED'
 
                     if self.flagon:
                         # on redraw during recording we reset the linecounts to avoid issues with projection lines
@@ -9399,10 +11388,42 @@ class tgraphcanvas(QObject):
                     length = 700 # 100 (128 the default)
                     randomness = 12 # 2 (16 default)
                     rcParams['path.sketch'] = (scale, length, randomness)
+                    _redraw_stage = 'PARAMS_SET'
 
                     # if no axis are set, we need to forceRenewAxis in any case
                     if self.ax is None or self.delta_ax is None:
                         forceRenewAxis = True
+
+                    # TASK A: Force axis renewal when layout state mismatches actual axes
+                    # This ensures GridSpec axes exist BEFORE any drawing when roast_layout_like=True
+                    has_roast_like_axes = (self.ax_events is not None and self.ax_controls is not None and self.ax_phases is not None)
+                    if self.roast_layout_like != has_roast_like_axes:
+                        forceRenewAxis = True
+
+                    # #region agent log (hypotheses H1, H2)
+                    try:
+                        _cursor_debug_log('redraw_entry', {
+                            'roast_layout_like': self.roast_layout_like,
+                            'has_roast_like_axes': has_roast_like_axes,
+                            'forceRenewAxis': forceRenewAxis,
+                            'ax_exists': self.ax is not None,
+                        }, hypothesis_id='H1', location='canvas.py:redraw_entry')
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                    # #endregion
+
+                    # A1: Log redraw entry checkpoint
+                    debug_checkpoint('A1_REDRAW_ENTRY', {
+                        'roast_layout_like': self.roast_layout_like,
+                        'event_style': getattr(self, 'event_style', 'classic'),
+                        'has_roast_like_axes': has_roast_like_axes,
+                        'forceRenewAxis': forceRenewAxis,
+                        'ax_exists': self.ax is not None,
+                        'delta_ax_exists': self.delta_ax is not None,
+                        'timex_len': len(self.timex) if self.timex else 0,
+                        'temp1_len': len(self.temp1) if self.temp1 else 0,
+                        'temp2_len': len(self.temp2) if self.temp2 else 0,
+                    })
 
                     xlabel_alpha_color = to_hex(to_rgba(self.palette['xlabel'], 0.47), keep_alpha=True)
                     ylabel_alpha_color = to_hex(to_rgba(self.palette['ylabel'], 0.47), keep_alpha=True)
@@ -9410,9 +11431,104 @@ class tgraphcanvas(QObject):
                     if forceRenewAxis or self.ax is None:
                         #rcParams['text.antialiased'] = True
                         self.fig.clf()
-                        self.ax = self.fig.add_subplot(111,facecolor=self.palette['background'])
+                        self.onmove_cid = None  # ensure_hover_connected() will reconnect
+                        self.ax_background = None  # avoid restore_region using stale buffer (e.g. 640×480 classic) after layout/size change
+                        # Hover artists were on old axes; drop refs so ensure_artists recreates them
+                        self._roast_hover_line = None
+                        self.roest_vline_roast = None
+                        self.roest_vline_controls = None
+                        self._roast_hover_anno = None
+                        self._roast_hover_bbox = None
+                        self._roast_hover_line_events = None
+                        self._roast_hover_line_controls = None
+                        self._roast_hover_line_phases = None
+                        self._roast_hover_texts = []
+                        self._roast_hover_bg = None
+                        for m in (getattr(self, '_roast_hover_markers_dict', None) or {}).values():
+                            try:
+                                m.remove()
+                            except Exception:  # pylint: disable=broad-except
+                                pass
+                        self._roast_hover_markers_dict = {}
+                        if self.roast_layout_like:
+                            # Roast-like layout: ax (temps/RoR) on top, ax_events, ax_controls, ax_phases below.
+                            # Give most space to the main chart (top); ensure it is never collapsed.
+                            gs = GridSpec(4, 1, height_ratios=[10, 0.5, 2.5, 0.7], hspace=0.02,
+                                          left=0.067, right=0.925, top=0.93, bottom=0.08)
+                            self.ax = self.fig.add_subplot(gs[0], facecolor=self.palette['background'])
+                            # B) ax_events must be transparent so it doesn't hide anything
+                            self.ax_events = self.fig.add_subplot(gs[1], sharex=self.ax, facecolor='none')
+                            self.ax_controls = self.fig.add_subplot(gs[2], sharex=self.ax, facecolor=self.palette['background'])
+                            self.ax_phases = self.fig.add_subplot(gs[3], sharex=self.ax, facecolor=self.palette['background'])
+                            # B) Set z-order: ax highest for curves, ax_events for text overlay
+                            # ax must have highest zorder to render curves on top; ax_events is for labels only
+                            self.ax.set_zorder(5)  # curves layer - highest
+                            self.ax_events.set_zorder(3)  # events text overlay - below curves
+                            # ax_events must be fully transparent and non-blocking
+                            self.ax_events.set_facecolor('none')
+                            self.ax_events.patch.set_alpha(0.0)
+                            self.ax_events.patch.set_visible(False)
+                            self.ax_events.set_frame_on(False)
+                            self.ax_controls.set_zorder(1)
+                            self.ax_phases.set_zorder(1)
+                            # Keep layout_engine none so GridSpec margins are not overridden
+                            self.fig.set_layout_engine('none')
+                        else:
+                            self.ax_events = None
+                            self.ax_controls = None
+                            self.ax_phases = None
+                            self._phases_bar_rects = None
+                            self._phases_bar_texts = None
+                            self.ax_phases_background = None
+                            self.ax = self.fig.add_subplot(111, facecolor=self.palette['background'])
+                            # Re-enable tight_layout for Classic mode
+                            self.fig.set_layout_engine('tight', **self.tight_layout_params)
                         self.ax.set_autoscale_on(False)
                         self.delta_ax = self.ax.twinx()
+                        # A) CRITICAL: Make delta_ax patch invisible so it doesn't cover ax curves
+                        self.delta_ax.set_facecolor('none')
+                        self.delta_ax.patch.set_visible(False)
+                        self.delta_ax.patch.set_alpha(0.0)
+                        # B) Ensure delta_ax is also properly ordered (zorder for ticks/labels)
+                        if self.roast_layout_like:
+                            self.delta_ax.set_zorder(3)
+                        # A2: Log after axis creation - concise summary
+                        def _ax_brief(ax: Any) -> str:
+                            if ax is None:
+                                return 'None'
+                            h = ax.get_position().bounds[3]
+                            return f'h={h*100:.1f}% z={ax.get_zorder()}'
+                        _redraw_stage = 'AXES_CREATED'
+                        debug_checkpoint('A2_AXES_CREATED', {
+                            'mode': 'roast' if self.roast_layout_like else 'classic',
+                            'ax': _ax_brief(self.ax),
+                            'delta_ax': _ax_brief(self.delta_ax),
+                            'ax_events': _ax_brief(self.ax_events),
+                            'ax_controls': _ax_brief(self.ax_controls),
+                            'ax_phases': _ax_brief(self.ax_phases),
+                        })
+                        # #region agent log (hypothesis H2: ax bounds after creation)
+                        try:
+                            _ax = self.ax
+                            _bounds = list(_ax.get_position().bounds) if _ax is not None else None
+                            _cursor_debug_log('axes_created', {
+                                'mode': 'roast' if self.roast_layout_like else 'classic',
+                                'ax_bounds': _bounds,
+                                'ax_height_pct': round(_bounds[3] * 100, 2) if _bounds and len(_bounds) >= 4 else None,
+                            }, hypothesis_id='H2', location='canvas.py:axes_created')
+                        except Exception:  # pylint: disable=broad-except
+                            pass
+                        # #endregion
+                        # #region agent log: axis bounds after creation (H-A, H-E)
+                        if self.roast_layout_like:
+                            def _bounds(a: Any) -> list[float]:
+                                return list(a.get_position().bounds) if a is not None else []
+                            _cursor_debug_log('bounds_after_creation', {
+                                'ax': _bounds(self.ax), 'ax_events': _bounds(self.ax_events),
+                                'ax_controls': _bounds(self.ax_controls), 'ax_phases': _bounds(self.ax_phases),
+                                'layout_engine': getattr(self.fig.get_layout_engine(), 'name', str(self.fig.get_layout_engine())),
+                            }, hypothesis_id='A,E', location='canvas.py:after_A2')
+                        # #endregion
 
                     # rcParams need to be set each redraw. Why?
 #                    rcParams['axes.linewidth'] = 0.8
@@ -9433,10 +11549,77 @@ class tgraphcanvas(QObject):
                             self.ax.clear()
                         self.ax.set_facecolor(self.palette['background'])
                         self.ax.set_ylim(self.ylimit_min, self.ylimit)
+                        # Hover artists were on ax/ax_controls; clear() removed them — invalidate refs so next onmove recreates
+                        if self.roast_layout_like:
+                            self._roast_hover_line = None
+                            self.roest_vline_roast = None
+                            self._roast_hover_line_controls = None
+                            self.roest_vline_controls = None
+                            self._roast_hover_anno = None
+                            self._roast_hover_bbox = None
+                            self._roast_hover_texts = []
+                            self._roast_hover_bg = None
+                            self._roast_hover_markers = []
+                            for m in (getattr(self, '_roast_hover_markers_dict', None) or {}).values():
+                                try:
+                                    m.remove()
+                                except Exception:  # pylint: disable=broad-except
+                                    pass
+                            self._roast_hover_markers_dict = {}
                     if self.delta_ax is not None:
                         with warnings.catch_warnings():
                             warnings.simplefilter('ignore')
                             self.delta_ax.clear()
+                        # A) CRITICAL: Keep delta_ax patch invisible after clear
+                        self.delta_ax.set_facecolor('none')
+                        self.delta_ax.patch.set_visible(False)
+                        self.delta_ax.patch.set_alpha(0.0)
+                    if self.ax_events is not None:
+                        # ax_events: thin band for event labels; fully transparent and non-blocking
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore')
+                            self.ax_events.clear()
+                        # B) Keep ax_events fully transparent and non-blocking (must not cover ax curves)
+                        self.ax_events.set_facecolor('none')
+                        self.ax_events.patch.set_alpha(0.0)
+                        self.ax_events.patch.set_visible(False)
+                        self.ax_events.set_frame_on(False)
+                        self.ax_events.set_ylim(0, 1)
+                        self.ax_events.set_yticks([])
+                        self.ax_events.tick_params(axis='both', which='both', left=False, right=False, labelleft=False, labelright=False, bottom=False, labelbottom=False)
+                        self.ax_events.set_zorder(3)  # below ax (zorder 5) so curves render on top
+                    if self.ax_controls is not None:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore')
+                            self.ax_controls.clear()
+                        self.ax_controls.set_facecolor(self.palette['background'])
+                        self.ax_controls.set_ylim(0, 100)
+                        self.ax_controls.set_ylabel(QApplication.translate('Label', '% / RPM'), color=self.palette['ylabel'], fontsize='small')
+                        self.ax_controls.tick_params(axis='x', labelbottom=False)
+                        self.ax_controls.yaxis.tick_left()
+                        self.ax_controls.yaxis.set_label_position('left')
+                        # Roest-like grid: major every 10, minor every 5
+                        self.ax_controls.yaxis.set_major_locator(ticker.MultipleLocator(10))
+                        self.ax_controls.yaxis.set_minor_locator(ticker.MultipleLocator(5))
+                        self.ax_controls.grid(True, which='major', axis='y',
+                                            color=self.palette.get('grid', '#888'),
+                                            linestyle=self.gridstyles[self.gridlinestyle],
+                                            linewidth=self.gridthickness, alpha=self.gridalpha)
+                        self.ax_controls.grid(True, which='minor', axis='y',
+                                            color=self.palette.get('grid', '#888'),
+                                            linestyle=':', linewidth=max(0.5, self.gridthickness * 0.6), alpha=self.gridalpha * 0.7)
+                    if self.ax_phases is not None:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore')
+                            self.ax_phases.clear()
+                        self._phases_bar_rects = None
+                        self._phases_bar_texts = None
+                        self.ax_phases.set_facecolor(self.palette['background'])
+                        self.ax_phases.set_ylim(0, 1)
+                        self.ax_phases.set_yticks([])
+                        self.ax_phases.tick_params(axis='y', which='both', left=False, labelleft=False)
+                        self.ax_phases.tick_params(axis='x', which='both', labelbottom=True)  # Show x-axis time labels only on phases bar (bottom)
+                        # NOTE: _draw_phases_bar() moved to AFTER xaxistosm() — see below
 
                     prop = self.aw.mpl_fontproperties.copy()
                     prop.set_size('small')
@@ -9496,13 +11679,15 @@ class tgraphcanvas(QObject):
                     two_ax_mode = self.twoAxisMode()
 
                     tick_dir = 'in' if self.flagon else 'inout'
+                    # In roast_layout_like mode, only ax_phases shows x-axis time labels
+                    show_roast_time_labels = not self.roast_layout_like
                     self.ax.tick_params(\
                         axis='x',           # changes apply to the x-axis
                         which='both',       # both major and minor ticks are affected
                         bottom=True,        # ticks along the bottom edge are on
                         top=False,          # ticks along the top edge are off
                         direction=tick_dir,
-                        labelbottom=True)   # labels along the bottom edge are on
+                        labelbottom=show_roast_time_labels)   # Hide time labels when phases axis shows them
                     self.ax.tick_params(\
                         axis='y',           # changes apply to the y-axis
                         which='both',       # both major and minor ticks are affected
@@ -9517,7 +11702,12 @@ class tgraphcanvas(QObject):
                     self.ax.fmt_xdata = self.fmt_timedata  # pyrefly:ignore[bad-assignment] # not assignable to attribute `fmt_ydata` with type `Formatter | None`
 
                     if self.delta_ax is not None:
-                        self.ax.set_zorder(self.delta_ax.get_zorder()+1) # put ax in front of delta_ax (which remains empty!)
+                        # ax must be in front of delta_ax and ax_events for curves to render on top
+                        # Roast-like: ax=5, ax_events=3, delta_ax=3; Classic: ax=delta_ax+1
+                        if self.roast_layout_like:
+                            self.ax.set_zorder(5)  # ensure curves render above ax_events (3) and delta_ax (3)
+                        else:
+                            self.ax.set_zorder(self.delta_ax.get_zorder()+1)
 
                     self.ax.patch.set_visible(True)
 
@@ -9618,6 +11808,8 @@ class tgraphcanvas(QObject):
                     self.l_eventtype2annos = []
                     self.l_eventtype3annos = []
                     self.l_eventtype4annos = []
+                    self.l_roest_vlines:list = []
+                    self.l_roest_labels:list = []
 
                     self.l_eventtype1special_annos = []
                     self.l_eventtype2special_annos = []
@@ -9641,7 +11833,39 @@ class tgraphcanvas(QObject):
                     self.l_eventflagbackannos = []
 
                     #update X ticks, labels, and rotating_colors
+                    # #region agent log: XAXISTOSM diagnostic
+                    if _ROAST_DEBUG_ENABLED and self.ax_phases is not None:
+                        debug_checkpoint('BEFORE_XAXISTOSM', {
+                            'ax_phases_xlim': list(self.ax_phases.get_xlim()),
+                            'ax_xlim': list(self.ax.get_xlim()) if self.ax else None,
+                            'startofx': getattr(self, 'startofx', None),
+                            'endofx': getattr(self, 'endofx', None),
+                        })
+                    # #endregion
                     self.xaxistosm(redraw=False)
+                    # #region agent log: XAXISTOSM diagnostic
+                    if _ROAST_DEBUG_ENABLED and self.ax_phases is not None:
+                        debug_checkpoint('AFTER_XAXISTOSM', {
+                            'ax_phases_xlim': list(self.ax_phases.get_xlim()),
+                            'ax_xlim': list(self.ax.get_xlim()) if self.ax else None,
+                        })
+                    # #endregion
+
+                    # Draw phases bar AFTER xaxistosm sets correct xlim for ax_phases
+                    # #region agent log (hypothesis H3: _draw_phases_bar)
+                    try:
+                        _cursor_debug_log('before_draw_phases_bar', {'ax_phases': self.ax_phases is not None, 'roast_layout_like': self.roast_layout_like}, hypothesis_id='H3', location='canvas.py:before_phases_bar')
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                    # #endregion
+                    if self.ax_phases is not None and self.roast_layout_like:
+                        self._draw_phases_bar()
+                    # #region agent log (hypothesis H3: after _draw_phases_bar)
+                    try:
+                        _cursor_debug_log('after_draw_phases_bar', {}, hypothesis_id='H3', location='canvas.py:after_phases_bar')
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                    # #endregion
 
                     if self.xgrid:
                         for label in self.ax.get_xticklabels(): # pyrefly:ignore[not-callable]
@@ -9650,8 +11874,8 @@ class tgraphcanvas(QObject):
                     rcParams['path.sketch'] = (0,0,0)
                     trans:Transform = transforms.blended_transform_factory(self.ax.transAxes,self.ax.transData)
 
-                    #draw water marks for dry phase region, mid phase region, and finish phase region
-                    if self.watermarksflag:
+                    #draw water marks for dry phase region, mid phase region, and finish phase region (Classic only; Roast-like has phases on ax_phases strip)
+                    if self.watermarksflag and not getattr(self, 'roast_layout_like', False):
                         rect1 = patches.Rectangle((0,self.phases[0]), width=1, height=(self.phases[1]-self.phases[0]),
                                                   transform=trans, color=self.palette['rect1'],alpha=0.15,
                                                   path_effects=[])
@@ -10018,8 +12242,17 @@ class tgraphcanvas(QObject):
                                     self.l_eventflagbackannos.append(anno)
                             #background events by value
                             if self.eventsGraphflag in {2, 3, 4}: # 2: step, 3: step+, 4: combo
+                                _ax_bg = self.ax_controls if self.ax_controls is not None else self.ax  # Roast-like: E1-E4 only on ax_controls
                                 self.E1backgroundtimex,self.E2backgroundtimex,self.E3backgroundtimex,self.E4backgroundtimex = [],[],[],[]
                                 self.E1backgroundvalues,self.E2backgroundvalues,self.E3backgroundvalues,self.E4backgroundvalues = [],[],[],[]
+                                E1backgroundvalues_pct:list[float] = []
+                                E2backgroundvalues_pct:list[float] = []
+                                E3backgroundvalues_pct:list[float] = []
+                                E4backgroundvalues_pct:list[float] = []
+                                E1_CHARGE_B_pct:float|None = None
+                                E2_CHARGE_B_pct:float|None = None
+                                E3_CHARGE_B_pct:float|None = None
+                                E4_CHARGE_B_pct:float|None = None
                                 E1b_last = E2b_last = E3b_last = E4b_last = 0  #not really necessary but guarantees that Exb_last is defined
                                 # remember event value @CHARGE (or last before CHARGE) to add if not self.backgroundShowFullflag
                                 E1_CHARGE_B:float|None = None
@@ -10043,6 +12276,8 @@ class tgraphcanvas(QObject):
                                         if skip_event:
                                             if (self.timeindexB[0] > -1 and txx < self.timeB[self.timeindexB[0]]):
                                                 E1_CHARGE_B = pos # remember event value at CHARGE
+                                                if self.ax_controls is not None:
+                                                    E1_CHARGE_B_pct = float(pos)
                                                 if not self.clampEvents:
                                                     E1_CHARGE_B = (E1_CHARGE_B*event_pos_factor)+event_pos_offset
                                             continue
@@ -10051,12 +12286,14 @@ class tgraphcanvas(QObject):
                                             self.E1backgroundvalues.append(pos)
                                         else:
                                             self.E1backgroundvalues.append((pos*event_pos_factor)+event_pos_offset)
+                                        if self.ax_controls is not None:
+                                            E1backgroundvalues_pct.append(float(pos))
                                         E1b_last = i
                                         try:
                                             if (len(self.timex)==0 or self.flagon) and self.eventsGraphflag!=4 and self.backgroundDetails and self.specialeventannovisibilities[0] != 0:
                                                 E1b_annotation = self.parseSpecialeventannotation(self.specialeventannotations[0], i, applyto='background')
-                                                temp = self.E1backgroundvalues[-1]
-                                                anno = self.ax.annotate(E1b_annotation, xy=(hoffset + self.timeB[int(event_idx)], voffset + temp),
+                                                temp = (E1backgroundvalues_pct[-1] if self.ax_controls is not None else self.E1backgroundvalues[-1])
+                                                anno = _ax_bg.annotate(E1b_annotation, xy=(hoffset + self.timeB[int(event_idx)], voffset + temp),
                                                             alpha=min(self.backgroundalpha + 0.1, 1.0),
                                                             color=self.palette['text'],
                                                             va='bottom', ha='left',
@@ -10079,6 +12316,8 @@ class tgraphcanvas(QObject):
                                         if skip_event:
                                             if (self.timeindexB[0] > -1 and txx < self.timeB[self.timeindexB[0]]):
                                                 E2_CHARGE_B = pos # remember event value at CHARGE
+                                                if self.ax_controls is not None:
+                                                    E2_CHARGE_B_pct = float(pos)
                                                 if not self.clampEvents:
                                                     E2_CHARGE_B = (E2_CHARGE_B*event_pos_factor)+event_pos_offset
                                             continue
@@ -10087,12 +12326,14 @@ class tgraphcanvas(QObject):
                                             self.E2backgroundvalues.append(pos)
                                         else:
                                             self.E2backgroundvalues.append((pos*event_pos_factor)+event_pos_offset)
+                                        if self.ax_controls is not None:
+                                            E2backgroundvalues_pct.append(float(pos))
                                         E2b_last = i
                                         try:
                                             if (len(self.timex)==0 or self.flagon) and self.eventsGraphflag!=4 and self.backgroundDetails and self.specialeventannovisibilities[1] != 0:
                                                 E2b_annotation = self.parseSpecialeventannotation(self.specialeventannotations[1], i, applyto='background')
-                                                temp = self.E2backgroundvalues[-1]
-                                                anno = self.ax.annotate(E2b_annotation, xy=(hoffset + self.timeB[int(event_idx)], voffset + temp),
+                                                temp = (E2backgroundvalues_pct[-1] if self.ax_controls is not None else self.E2backgroundvalues[-1])
+                                                anno = _ax_bg.annotate(E2b_annotation, xy=(hoffset + self.timeB[int(event_idx)], voffset + temp),
                                                             alpha=min(self.backgroundalpha + 0.1, 1.0),
                                                             color=self.palette['text'],
                                                             va='bottom', ha='left',
@@ -10115,6 +12356,8 @@ class tgraphcanvas(QObject):
                                         if skip_event:
                                             if (self.timeindexB[0] > -1 and txx < self.timeB[self.timeindexB[0]]):
                                                 E3_CHARGE_B = pos # remember event value at CHARGE
+                                                if self.ax_controls is not None:
+                                                    E3_CHARGE_B_pct = float(pos)
                                                 if not self.clampEvents:
                                                     E3_CHARGE_B = (E3_CHARGE_B*event_pos_factor)+event_pos_offset
                                             continue
@@ -10123,12 +12366,14 @@ class tgraphcanvas(QObject):
                                             self.E3backgroundvalues.append(pos)
                                         else:
                                             self.E3backgroundvalues.append((pos*event_pos_factor)+event_pos_offset)
+                                        if self.ax_controls is not None:
+                                            E3backgroundvalues_pct.append(float(pos))
                                         E3b_last = i
                                         try:
                                             if (len(self.timex)==0 or self.flagon) and self.eventsGraphflag!=4 and self.backgroundDetails and self.specialeventannovisibilities[2] != 0:
                                                 E3b_annotation = self.parseSpecialeventannotation(self.specialeventannotations[2], i, applyto='background')
-                                                temp = self.E3backgroundvalues[-1]
-                                                anno = self.ax.annotate(E3b_annotation, xy=(hoffset + self.timeB[int(event_idx)], voffset + temp),
+                                                temp = (E3backgroundvalues_pct[-1] if self.ax_controls is not None else self.E3backgroundvalues[-1])
+                                                anno = _ax_bg.annotate(E3b_annotation, xy=(hoffset + self.timeB[int(event_idx)], voffset + temp),
                                                             alpha=min(self.backgroundalpha + 0.1, 1.0),
                                                             color=self.palette['text'],
                                                             va='bottom', ha='left',
@@ -10163,8 +12408,8 @@ class tgraphcanvas(QObject):
                                         try:
                                             if (len(self.timex)==0 or self.flagon) and self.eventsGraphflag!=4 and self.backgroundDetails and self.specialeventannovisibilities[3] != 0:
                                                 E4b_annotation = self.parseSpecialeventannotation(self.specialeventannotations[3], i, applyto='background')
-                                                temp = self.E4backgroundvalues[-1]
-                                                anno = self.ax.annotate(E4b_annotation, xy=(hoffset + self.timeB[int(event_idx)], voffset + temp),
+                                                temp = (E4backgroundvalues_pct[-1] if self.ax_controls is not None else self.E4backgroundvalues[-1])
+                                                anno = _ax_bg.annotate(E4b_annotation, xy=(hoffset + self.timeB[int(event_idx)], voffset + temp),
                                                             alpha=min(self.backgroundalpha + 0.1, 1.0),
                                                             color=self.palette['text'],
                                                             va='bottom', ha='left',
@@ -10199,7 +12444,8 @@ class tgraphcanvas(QObject):
                                     else:
                                         E1xB = self.E1backgroundtimex
                                         E1yB = self.E1backgroundvalues
-                                    self.l_backgroundeventtype1dots, = self.ax.plot(E1xB, E1yB, color=self.EvalueColor[0],
+                                    E1yB_plot = numpy.clip(numpy.array(E1yB), 0, 100) if _ax_bg == self.ax_controls else E1yB
+                                    self.l_backgroundeventtype1dots, = _ax_bg.plot(E1xB, E1yB_plot, color=self.EvalueColor[0],
                                                                                 marker=(self.EvalueMarker[0] if self.eventsGraphflag != 4 else None),
                                                                                 markersize = self.EvalueMarkerSize[0],
                                                                                 picker=True,
@@ -10207,7 +12453,7 @@ class tgraphcanvas(QObject):
                                                                                 #markevery=every,
                                                                                 linestyle='-',
                                                                                 drawstyle=(self.drawstyle_default if self.specialeventplaybackramp[0] else 'steps-post'),
-                                                                                linewidth = self.Evaluelinethickness[0],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(0,True))
+                                                                                linewidth = self.Evaluelinethickness[0],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(0,True), clip_on=True)
                                 if len(self.E2backgroundtimex)>0 and len(self.E2backgroundtimex)==len(self.E2backgroundvalues):
                                     if (self.timeindexB[6] > 0 and self.extendevents and self.timeB[self.timeindexB[6]] > self.timeB[self.backgroundEvents[E2b_last]]):   #if drop exists and last event was earlier
                                         # repeat last value at time of DROP
@@ -10217,13 +12463,21 @@ class tgraphcanvas(QObject):
                                             self.E2backgroundvalues.append(pos)
                                         else:
                                             self.E2backgroundvalues.append((pos*event_pos_factor)+event_pos_offset)
+                                        if self.ax_controls is not None:
+                                            E2backgroundvalues_pct.append(float(pos))
                                     if E2_CHARGE_B is not None and len(self.E2backgroundvalues)>1 and self.E2backgroundvalues[0] != E2_CHARGE_B:
                                         E2xB = [self.timeB[self.timeindexB[0]]] + self.E2backgroundtimex
                                         E2yB = [E2_CHARGE_B] + self.E2backgroundvalues
+                                        if self.ax_controls is not None and E2_CHARGE_B_pct is not None:
+                                            E2yB_pct = [E2_CHARGE_B_pct] + E2backgroundvalues_pct
+                                        else:
+                                            E2yB_pct = E2yB
                                     else:
                                         E2xB = self.E2backgroundtimex
                                         E2yB = self.E2backgroundvalues
-                                    self.l_backgroundeventtype2dots, = self.ax.plot(E2xB, E2yB, color=self.EvalueColor[1],
+                                        E2yB_pct = (E2backgroundvalues_pct if self.ax_controls is not None else E2yB)
+                                    E2yB_plot = (numpy.clip(numpy.array(E2yB_pct), 0, 100) if self.ax_controls is not None else E2yB)
+                                    self.l_backgroundeventtype2dots, = _ax_bg.plot(E2xB, E2yB_plot, color=self.EvalueColor[1],
                                                                                 marker=(self.EvalueMarker[1] if self.eventsGraphflag != 4 else None),
                                                                                 markersize = self.EvalueMarkerSize[1],
                                                                                 picker=True,
@@ -10231,7 +12485,7 @@ class tgraphcanvas(QObject):
                                                                                 #markevery=every,
                                                                                 linestyle='-',
                                                                                 drawstyle=(self.drawstyle_default if self.specialeventplaybackramp[1] else 'steps-post'),
-                                                                                linewidth = self.Evaluelinethickness[1],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(1,True))
+                                                                                linewidth = self.Evaluelinethickness[1],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(1,True), clip_on=True)
                                 if len(self.E3backgroundtimex)>0 and len(self.E3backgroundtimex)==len(self.E3backgroundvalues):
                                     if (self.timeindexB[6] > 0 and self.extendevents and self.timeB[self.timeindexB[6]] > self.timeB[self.backgroundEvents[E3b_last]]):   #if drop exists and last event was earlier
                                         # repeat last value at time of DROP
@@ -10241,13 +12495,21 @@ class tgraphcanvas(QObject):
                                             self.E3backgroundvalues.append(pos)
                                         else:
                                             self.E3backgroundvalues.append((pos*event_pos_factor)+event_pos_offset)
+                                        if self.ax_controls is not None:
+                                            E3backgroundvalues_pct.append(float(pos))
                                     if E3_CHARGE_B is not None and len(self.E3backgroundvalues)>1 and self.E3backgroundvalues[0] != E3_CHARGE_B:
                                         E3xB = [self.timeB[self.timeindexB[0]]] + self.E3backgroundtimex
                                         E3yB = [E3_CHARGE_B] + self.E3backgroundvalues
+                                        if self.ax_controls is not None and E3_CHARGE_B_pct is not None:
+                                            E3yB_pct = [E3_CHARGE_B_pct] + E3backgroundvalues_pct
+                                        else:
+                                            E3yB_pct = E3yB
                                     else:
                                         E3xB = self.E3backgroundtimex
                                         E3yB = self.E3backgroundvalues
-                                    self.l_backgroundeventtype3dots, = self.ax.plot(E3xB, E3yB, color=self.EvalueColor[2],
+                                        E3yB_pct = (E3backgroundvalues_pct if self.ax_controls is not None else E3yB)
+                                    E3yB_plot = (numpy.clip(numpy.array(E3yB_pct), 0, 100) if self.ax_controls is not None else E3yB)
+                                    self.l_backgroundeventtype3dots, = _ax_bg.plot(E3xB, E3yB_plot, color=self.EvalueColor[2],
                                                                                 marker=(self.EvalueMarker[2] if self.eventsGraphflag != 4 else None),
                                                                                 markersize = self.EvalueMarkerSize[2],
                                                                                 picker=True,
@@ -10255,7 +12517,7 @@ class tgraphcanvas(QObject):
                                                                                 #markevery=every,
                                                                                 linestyle='-',
                                                                                 drawstyle=(self.drawstyle_default if self.specialeventplaybackramp[2] else 'steps-post'),
-                                                                                linewidth = self.Evaluelinethickness[2],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(2,True))
+                                                                                linewidth = self.Evaluelinethickness[2],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(2,True), clip_on=True)
                                 if len(self.E4backgroundtimex)>0 and len(self.E4backgroundtimex)==len(self.E4backgroundvalues):
                                     if (self.timeindexB[6] > 0 and self.extendevents and self.timeB[self.timeindexB[6]] > self.timeB[self.backgroundEvents[E4b_last]]):   #if drop exists and last event was earlier
                                         # repeat last value at time of DROP
@@ -10265,13 +12527,21 @@ class tgraphcanvas(QObject):
                                             self.E4backgroundvalues.append(pos)
                                         else:
                                             self.E4backgroundvalues.append((pos*event_pos_factor)+event_pos_offset)
+                                        if self.ax_controls is not None:
+                                            E4backgroundvalues_pct.append(float(pos))
                                     if E4_CHARGE_B is not None and len(self.E4backgroundvalues)>1 and self.E4backgroundvalues[0] != E4_CHARGE_B:
                                         E4xB = [self.timeB[self.timeindexB[0]]] + self.E4backgroundtimex
                                         E4yB = [E4_CHARGE_B] + self.E4backgroundvalues
+                                        if self.ax_controls is not None and E4_CHARGE_B_pct is not None:
+                                            E4yB_pct = [E4_CHARGE_B_pct] + E4backgroundvalues_pct
+                                        else:
+                                            E4yB_pct = E4yB
                                     else:
                                         E4xB = self.E4backgroundtimex
                                         E4yB = self.E4backgroundvalues
-                                    self.l_backgroundeventtype4dots, = self.ax.plot(E4xB, E4yB, color=self.EvalueColor[3],
+                                        E4yB_pct = (E4backgroundvalues_pct if self.ax_controls is not None else E4yB)
+                                    E4yB_plot = (numpy.clip(numpy.array(E4yB_pct), 0, 100) if self.ax_controls is not None else E4yB)
+                                    self.l_backgroundeventtype4dots, = _ax_bg.plot(E4xB, E4yB_plot, color=self.EvalueColor[3],
                                                                                 marker=(self.EvalueMarker[3] if self.eventsGraphflag != 4 else None),
                                                                                 markersize = self.EvalueMarkerSize[3],
                                                                                 picker=True,
@@ -10279,13 +12549,16 @@ class tgraphcanvas(QObject):
                                                                                 #markevery=every,
                                                                                 linestyle='-',
                                                                                 drawstyle=(self.drawstyle_default if self.specialeventplaybackramp[3] else 'steps-post'),
-                                                                                linewidth = self.Evaluelinethickness[3],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(3,True))
+                                                                                linewidth = self.Evaluelinethickness[3],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(3,True), clip_on=True)
 
                             if len(self.backgroundEvents) > 0:
                                 Bevalues:list[list[float]] = [[],[],[],[]]
+                                Bevalues_pct:list[list[float]] = [[],[],[],[]]
                                 if self.eventsGraphflag == 4:
                                     # we prepare copies of the background Evalues
                                     Bevalues = [self.E1backgroundvalues[:],self.E2backgroundvalues[:],self.E3backgroundvalues[:],self.E4backgroundvalues[:]]
+                                    if self.ax_controls is not None:
+                                        Bevalues_pct = [E1backgroundvalues_pct[:], E2backgroundvalues_pct[:], E3backgroundvalues_pct[:], E4backgroundvalues_pct[:]]
                                 for i, event_idx in enumerate(self.backgroundEvents):
                                     if not self.backgroundShowFullflag and (((not self.autotimex or self.autotimexMode == 0) and event_idx < bcharge_idx) or event_idx > bdrop_idx):
                                         continue
@@ -10310,8 +12583,15 @@ class tgraphcanvas(QObject):
                                         if self.eventsGraphflag == 4 and self.backgroundEtypes[i] < 4 and self.showEtypes[self.backgroundEtypes[i]] and len(Bevalues[self.backgroundEtypes[i]])>0:
                                             Btemp = Bevalues[self.backgroundEtypes[i]][0]
                                             Bevalues[self.backgroundEtypes[i]] = Bevalues[self.backgroundEtypes[i]][1:]
+                                            # Roast-like: use % for y when drawing on ax_controls
+                                            if self.ax_controls is not None and len(Bevalues_pct[self.backgroundEtypes[i]]) > 0:
+                                                Btemp_display = Bevalues_pct[self.backgroundEtypes[i]][0]
+                                                Bevalues_pct[self.backgroundEtypes[i]] = Bevalues_pct[self.backgroundEtypes[i]][1:]
+                                            else:
+                                                Btemp_display = Btemp
                                         else:
                                             Btemp = None
+                                            Btemp_display = None
 
                                         if Btemp is not None and self.showEtypes[self.backgroundEtypes[i]]:
                                             if self.backgroundEtypes[i] == 0:
@@ -10336,8 +12616,9 @@ class tgraphcanvas(QObject):
                                                 boxcolor = self.palette['specialeventbox']
                                                 textcolor = self.palette['specialeventtext']
                                             if self.eventsGraphflag in {0, 3} or self.backgroundEtypes[i] > 3:
-                                                anno = self.ax.annotate('f{firstletter}{secondletter}', xy=(self.timeB[int(event_idx)], Btemp),
-                                                             xytext=(self.timeB[int(event_idx)],Btemp+height),
+                                                _Btemp = Btemp_display if Btemp_display is not None else Btemp
+                                                anno = _ax_bg.annotate('f{firstletter}{secondletter}', xy=(self.timeB[int(event_idx)], _Btemp),
+                                                             xytext=(self.timeB[int(event_idx)],_Btemp+height),
                                                              alpha=min(self.backgroundalpha + 0.1, 1.0),
                                                              color=self.palette['bgeventtext'],
                                                              va='center', ha='center',
@@ -10350,8 +12631,9 @@ class tgraphcanvas(QObject):
                                             elif self.eventsGraphflag == 4:
                                                 if thirdletter != '':
                                                     firstletter = ''
-                                                anno = self.ax.annotate(f'{firstletter}{secondletter}{thirdletter}', xy=(self.timeB[int(event_idx)], Btemp),
-                                                             xytext=(self.timeB[int(event_idx)],Btemp),
+                                                _Btemp = Btemp_display if Btemp_display is not None else Btemp
+                                                anno = _ax_bg.annotate(f'{firstletter}{secondletter}{thirdletter}', xy=(self.timeB[int(event_idx)], _Btemp),
+                                                             xytext=(self.timeB[int(event_idx)],_Btemp),
                                                              alpha=min(self.backgroundalpha + 0.3, 1.0),
                                                              color=self.palette['bgeventtext'],
                                                              va='center', ha='center',
@@ -10371,7 +12653,16 @@ class tgraphcanvas(QObject):
                                                 anno.set_in_layout(False)  # remove text annotations from tight_layout calculation
                         #check backgroundDetails flag
                         if self.backgroundDetails:
-                            d:float = self.ylimit - self.ylimit_min
+                            # Safe computation of d: guard against None ylimit values
+                            if _is_valid_number(self.ylimit) and _is_valid_number(self.ylimit_min):
+                                d:float = self.ylimit - self.ylimit_min
+                            else:
+                                d = 400.0  # Fallback for invalid limits
+                                if _ROAST_DEBUG_ENABLED:
+                                    debug_checkpoint('BACKGROUND_D_FALLBACK', {
+                                        'ylimit': self.ylimit,
+                                        'ylimit_min': self.ylimit_min,
+                                    })
                             d = d - d/5
                             #if there is a profile loaded with CHARGE, then save time to get the relative time
                             if self.timeindex[0] != -1:   #verify it exists before loading it, otherwise the list could go out of index
@@ -10531,13 +12822,13 @@ class tgraphcanvas(QObject):
                                         if self.ETcurve or self.BTcurve:
                                             # plot events on BT when showeventsonbt is true
                                             if self.ETcurve and not (self.BTcurve and self.showeventsonbt) and self.temp1[event_idx] >= self.temp2[event_idx]:
-                                                col = self.palette['et']
+                                                col = self.palette.get('et') or '#1f77b4'
                                                 if self.flagon:
                                                     temps = self.temp1
                                                 else:
                                                     temps = self.stemp1
                                             else:
-                                                col = self.palette['bt']
+                                                col = self.palette.get('bt') or '#d62728'
                                                 if self.flagon:
                                                     temps = self.temp2
                                                 else:
@@ -10563,8 +12854,18 @@ class tgraphcanvas(QObject):
                                         _log.exception(e)
 
                         elif self.eventsGraphflag in {2, 3, 4}: # in this mode we have to generate the plots even if Nevents=0 to avoid redraw issues resulting from an incorrect number of plot count
+                            _ax_ev = self.ax_controls if (self.ax_controls is not None and self.eventsGraphflag in {2, 3, 4}) else self.ax  # Roast-like: E1-E4 only on ax_controls
                             self.E1timex,self.E2timex,self.E3timex,self.E4timex = [],[],[],[]
                             self.E1values,self.E2values,self.E3values,self.E4values = [],[],[],[]
+                            # for Roast-like layout: 0-100% values for ax_controls
+                            E1values_pct:list[float] = []
+                            E2values_pct:list[float] = []
+                            E3values_pct:list[float] = []
+                            E4values_pct:list[float] = []
+                            E1_CHARGE_pct:float|None = None
+                            E2_CHARGE_pct:float|None = None
+                            E3_CHARGE_pct:float|None = None
+                            E4_CHARGE_pct:float|None = None
                             #not really necessary but guarantees that Ex_last is defined
                             E1_last:int = 0
                             E2_last:int = 0
@@ -10583,6 +12884,48 @@ class tgraphcanvas(QObject):
                             voffset = 1  #relative to the event dot
                             self.overlapList = []
                             eventannotationprop.set_size('x-small')
+                            roest_events:list[tuple[float, str, int]] = []  # (time, label, category: 0=main, 1=special) for Roest markers on ax
+                            # clear Roest artists when not using Roest style (e.g. switched to classic)
+                            if not self.is_roest_mode():
+                                for vl in self.l_roest_vlines:
+                                    try:
+                                        vl.remove()
+                                    except Exception: # pylint: disable=broad-except
+                                        pass
+                                for la in self.l_roest_labels:
+                                    try:
+                                        la.remove()
+                                    except Exception: # pylint: disable=broad-except
+                                        pass
+                                self.l_roest_vlines = []
+                                self.l_roest_labels = []
+                            # Build Roest markers from timeindex (main events) independent of eventsGraphflag/E1–E4
+                            if self.is_roest_mode() and len(self.timex) > 0:
+                                # Main events: CHARGE, TP, DRY END, FCs, FCe, SCs, SCe, DROP (whatever exists)
+                                # TASK A/B: ONLY main roast events - NO operator control events (E1-E4)
+                                main_labels = [
+                                    (0, QApplication.translate('Label', 'CHARGE')),
+                                    (-1, 'TP'),  # -1 → use TP index (short label for Roest)
+                                    (1, QApplication.translate('Label', 'DRY')),  # DRY END / YELLOW
+                                    (2, 'FCs'),
+                                    (3, 'FCe'),
+                                    (4, 'SCs'),
+                                    (5, 'SCe'),
+                                    (6, QApplication.translate('Label', 'DROP')),
+                                ]
+                                for idx, label in main_labels:
+                                    if idx == -1:
+                                        tp_idx = self.aw.findTP()
+                                        if tp_idx is not None and tp_idx >= 0 and len(self.timex) > tp_idx:
+                                            t = self.timex[tp_idx]
+                                            roest_events.append((t, label, 0))
+                                    elif idx == 0:
+                                        if self.timeindex[0] >= 0 and len(self.timex) > self.timeindex[0]:
+                                            roest_events.append((self.timex[self.timeindex[0]], label, 0))
+                                    elif self.timeindex[idx] and len(self.timex) > self.timeindex[idx]:
+                                        roest_events.append((self.timex[self.timeindex[idx]], label, 0))
+                                # TASK A/B: Do NOT add specialevents (E1-E4 control events) as Roest markers
+                                # This previously added Burner/Gas/Air/RPM numeric labels; now filtered out
                             for i in range(Nevents):
                                 if len(self.specialevents) > i and len(self.specialeventstype) > i and len(self.specialeventsvalue) > i and len(self.specialeventsStrings) > i:
                                     pos = max(0,int(round((self.specialeventsvalue[i]-1)*10)))
@@ -10597,6 +12940,8 @@ class tgraphcanvas(QObject):
                                                         E1_CHARGE = pos # remember event value at CHARGE
                                                         if not self.clampEvents:
                                                             E1_CHARGE = (E1_CHARGE*event_pos_factor)+event_pos_offset
+                                                        if self.ax_controls is not None:
+                                                            E1_CHARGE_pct = float(pos)
                                                     # don't draw event lines before CHARGE if foregroundShowFullflag is not set
                                                     continue
                                                 self.E1timex.append(txx)
@@ -10604,28 +12949,31 @@ class tgraphcanvas(QObject):
                                                     self.E1values.append(pos)
                                                 else:
                                                     self.E1values.append((pos*event_pos_factor)+event_pos_offset)
+                                                if self.ax_controls is not None:
+                                                    E1values_pct.append(float(pos))
                                                 E1_nonempty = True
                                                 E1_last = i
                                                 try:
                                                     if not self.flagon and self.eventsGraphflag!=4 and self.specialeventannovisibilities[0] != 0:
                                                         E1_annotation = self.parseSpecialeventannotation(self.specialeventannotations[0], i)
-                                                        temp = self.E1values[-1]
-                                                        anno = self.ax.annotate(E1_annotation, xy=(hoffset + self.timex[int(self.specialevents[i])], voffset + temp),
-                                                                    alpha=.9,
-                                                                    color=self.palette['text'],
-                                                                    va='bottom', ha='left',
-                                                                    fontproperties=eventannotationprop,
-                                                                    path_effects=[PathEffects.withStroke(linewidth=self.patheffects,foreground=self.palette['background'])],
-                                                                    )
-                                                        self.l_eventtype1annos.append(anno)
-                                                        self.l_eventtype1special_annos.append(anno)
-                                                        anno.set_in_layout(False)  # remove text annotations from tight_layout calculation
-                                                        try:
-                                                            overlap = self.checkOverlap(anno) #, i, E1_annotation)
-                                                            if overlap:
-                                                                anno.remove()
-                                                        except Exception: # pylint: disable=broad-except
-                                                            pass
+                                                        if not self.is_roest_mode():
+                                                            temp = (E1values_pct[-1] if self.ax_controls is not None else self.E1values[-1])
+                                                            anno = _ax_ev.annotate(E1_annotation, xy=(hoffset + self.timex[int(self.specialevents[i])], voffset + temp),
+                                                                        alpha=.9,
+                                                                        color=self.palette['text'],
+                                                                        va='bottom', ha='left',
+                                                                        fontproperties=eventannotationprop,
+                                                                        path_effects=[PathEffects.withStroke(linewidth=self.patheffects,foreground=self.palette['background'])],
+                                                                        )
+                                                            self.l_eventtype1annos.append(anno)
+                                                            self.l_eventtype1special_annos.append(anno)
+                                                            anno.set_in_layout(False)  # remove text annotations from tight_layout calculation
+                                                            try:
+                                                                overlap = self.checkOverlap(anno) #, i, E1_annotation)
+                                                                if overlap:
+                                                                    anno.remove()
+                                                            except Exception: # pylint: disable=broad-except
+                                                                pass
                                                 except Exception as ex: # pylint: disable=broad-except
                                                     _log.exception(ex)
                                                     _, _, exc_tb = sys.exc_info()
@@ -10637,6 +12985,8 @@ class tgraphcanvas(QObject):
                                                         E2_CHARGE = pos # remember event value at CHARGE
                                                         if not self.clampEvents:
                                                             E2_CHARGE = (E2_CHARGE*event_pos_factor)+event_pos_offset
+                                                        if self.ax_controls is not None:
+                                                            E2_CHARGE_pct = float(pos)
                                                     # don't draw event lines before CHARGE if foregroundShowFullflag is not set
                                                     continue
                                                 self.E2timex.append(txx)
@@ -10644,28 +12994,31 @@ class tgraphcanvas(QObject):
                                                     self.E2values.append(pos)
                                                 else:
                                                     self.E2values.append((pos*event_pos_factor)+event_pos_offset)
+                                                if self.ax_controls is not None:
+                                                    E2values_pct.append(float(pos))
                                                 E2_nonempty = True
                                                 E2_last = i
                                                 try:
                                                     if not self.flagon and self.eventsGraphflag!=4 and self.specialeventannovisibilities[1] != 0:
                                                         E2_annotation = self.parseSpecialeventannotation(self.specialeventannotations[1], i)
-                                                        temp = self.E2values[-1]
-                                                        anno = self.ax.annotate(E2_annotation, xy=(hoffset + self.timex[int(self.specialevents[i])], voffset + temp),
-                                                                    alpha=.9,
-                                                                    color=self.palette['text'],
-                                                                    va='bottom', ha='left',
-                                                                    fontproperties=eventannotationprop,
-                                                                    path_effects=[PathEffects.withStroke(linewidth=self.patheffects,foreground=self.palette['background'])],
-                                                                    )
-                                                        self.l_eventtype2annos.append(anno)
-                                                        self.l_eventtype2special_annos.append(anno)
-                                                        anno.set_in_layout(False)  # remove text annotations from tight_layout calculation
-                                                        try:
-                                                            overlap = self.checkOverlap(anno) #, i, E2_annotation)
-                                                            if overlap:
-                                                                anno.remove()
-                                                        except Exception: # pylint: disable=broad-except
-                                                            pass
+                                                        if not self.is_roest_mode():
+                                                            temp = (E2values_pct[-1] if self.ax_controls is not None else self.E2values[-1])
+                                                            anno = _ax_ev.annotate(E2_annotation, xy=(hoffset + self.timex[int(self.specialevents[i])], voffset + temp),
+                                                                        alpha=.9,
+                                                                        color=self.palette['text'],
+                                                                        va='bottom', ha='left',
+                                                                        fontproperties=eventannotationprop,
+                                                                        path_effects=[PathEffects.withStroke(linewidth=self.patheffects,foreground=self.palette['background'])],
+                                                                        )
+                                                            self.l_eventtype2annos.append(anno)
+                                                            self.l_eventtype2special_annos.append(anno)
+                                                            anno.set_in_layout(False)  # remove text annotations from tight_layout calculation
+                                                            try:
+                                                                overlap = self.checkOverlap(anno) #, i, E2_annotation)
+                                                                if overlap:
+                                                                    anno.remove()
+                                                            except Exception: # pylint: disable=broad-except
+                                                                pass
 
                                                 except Exception as ex: # pylint: disable=broad-except
                                                     _log.exception(ex)
@@ -10678,6 +13031,8 @@ class tgraphcanvas(QObject):
                                                         E3_CHARGE = pos # remember event value at CHARGE
                                                         if not self.clampEvents:
                                                             E3_CHARGE = (E3_CHARGE*event_pos_factor)+event_pos_offset
+                                                        if self.ax_controls is not None:
+                                                            E3_CHARGE_pct = float(pos)
                                                     # don't draw event lines before CHARGE if foregroundShowFullflag is not set
                                                     continue
                                                 self.E3timex.append(txx)
@@ -10685,28 +13040,31 @@ class tgraphcanvas(QObject):
                                                     self.E3values.append(pos)
                                                 else:
                                                     self.E3values.append((pos*event_pos_factor)+event_pos_offset)
+                                                if self.ax_controls is not None:
+                                                    E3values_pct.append(float(pos))
                                                 E3_nonempty = True
                                                 E3_last = i
                                                 try:
                                                     if not self.flagon and self.eventsGraphflag!=4 and self.specialeventannovisibilities[2] != 0:
                                                         E3_annotation = self.parseSpecialeventannotation(self.specialeventannotations[2], i)
-                                                        temp = self.E3values[-1]
-                                                        anno = self.ax.annotate(E3_annotation, xy=(hoffset + self.timex[int(self.specialevents[i])], voffset + temp),
-                                                                    alpha=.9,
-                                                                    color=self.palette['text'],
-                                                                    va='bottom', ha='left',
-                                                                    fontproperties=eventannotationprop,
-                                                                    path_effects=[PathEffects.withStroke(linewidth=self.patheffects,foreground=self.palette['background'])],
-                                                                    )
-                                                        self.l_eventtype3annos.append(anno)
-                                                        self.l_eventtype3special_annos.append(anno)
-                                                        anno.set_in_layout(False)  # remove text annotations from tight_layout calculation
-                                                        try:
-                                                            overlap = self.checkOverlap(anno) #, i, E3_annotation)
-                                                            if overlap:
-                                                                anno.remove()
-                                                        except Exception: # pylint: disable=broad-except
-                                                            pass
+                                                        if not self.is_roest_mode():
+                                                            temp = (E3values_pct[-1] if self.ax_controls is not None else self.E3values[-1])
+                                                            anno = _ax_ev.annotate(E3_annotation, xy=(hoffset + self.timex[int(self.specialevents[i])], voffset + temp),
+                                                                        alpha=.9,
+                                                                        color=self.palette['text'],
+                                                                        va='bottom', ha='left',
+                                                                        fontproperties=eventannotationprop,
+                                                                        path_effects=[PathEffects.withStroke(linewidth=self.patheffects,foreground=self.palette['background'])],
+                                                                        )
+                                                            self.l_eventtype3annos.append(anno)
+                                                            self.l_eventtype3special_annos.append(anno)
+                                                            anno.set_in_layout(False)  # remove text annotations from tight_layout calculation
+                                                            try:
+                                                                overlap = self.checkOverlap(anno) #, i, E3_annotation)
+                                                                if overlap:
+                                                                    anno.remove()
+                                                            except Exception: # pylint: disable=broad-except
+                                                                pass
                                                 except Exception as ex: # pylint: disable=broad-except
                                                     _log.exception(ex)
                                                     _, _, exc_tb = sys.exc_info()
@@ -10718,6 +13076,8 @@ class tgraphcanvas(QObject):
                                                         E4_CHARGE = pos # remember event value at CHARGE
                                                         if not self.clampEvents:
                                                             E4_CHARGE = (E4_CHARGE*event_pos_factor)+event_pos_offset
+                                                        if self.ax_controls is not None:
+                                                            E4_CHARGE_pct = float(pos)
                                                     # don't draw event lines before CHARGE if foregroundShowFullflag is not set
                                                     continue
                                                 self.E4timex.append(txx)
@@ -10725,34 +13085,120 @@ class tgraphcanvas(QObject):
                                                     self.E4values.append(pos)
                                                 else:
                                                     self.E4values.append((pos*event_pos_factor)+event_pos_offset)
+                                                if self.ax_controls is not None:
+                                                    E4values_pct.append(float(pos))
                                                 E4_nonempty = True
                                                 E4_last = i
                                                 try:
                                                     if not self.flagon and self.eventsGraphflag!=4 and self.specialeventannovisibilities[3] != 0:
                                                         E4_annotation = self.parseSpecialeventannotation(self.specialeventannotations[3], i)
-                                                        temp = self.E4values[-1]
-                                                        anno = self.ax.annotate(E4_annotation, xy=(hoffset + self.timex[int(self.specialevents[i])], voffset + temp),
-                                                                    alpha=.9,
-                                                                    color=self.palette['text'],
-                                                                    va='bottom', ha='left',
-                                                                    fontproperties=eventannotationprop,
-                                                                    path_effects=[PathEffects.withStroke(linewidth=self.patheffects,foreground=self.palette['background'])],
-                                                                    )
-                                                        self.l_eventtype4annos.append(anno)
-                                                        self.l_eventtype4special_annos.append(anno)
-                                                        anno.set_in_layout(False)  # remove text annotations from tight_layout calculation
-                                                        try:
-                                                            overlap = self.checkOverlap(anno) #, i, E4_annotation)
-                                                            if overlap:
-                                                                anno.remove()
-                                                        except Exception: # pylint: disable=broad-except
-                                                            pass
+                                                        if not self.is_roest_mode():
+                                                            temp = (E4values_pct[-1] if self.ax_controls is not None else self.E4values[-1])
+                                                            anno = _ax_ev.annotate(E4_annotation, xy=(hoffset + self.timex[int(self.specialevents[i])], voffset + temp),
+                                                                        alpha=.9,
+                                                                        color=self.palette['text'],
+                                                                        va='bottom', ha='left',
+                                                                        fontproperties=eventannotationprop,
+                                                                        path_effects=[PathEffects.withStroke(linewidth=self.patheffects,foreground=self.palette['background'])],
+                                                                        )
+                                                            self.l_eventtype4annos.append(anno)
+                                                            self.l_eventtype4special_annos.append(anno)
+                                                            anno.set_in_layout(False)  # remove text annotations from tight_layout calculation
+                                                            try:
+                                                                overlap = self.checkOverlap(anno) #, i, E4_annotation)
+                                                                if overlap:
+                                                                    anno.remove()
+                                                            except Exception: # pylint: disable=broad-except
+                                                                pass
                                                 except Exception as ex: # pylint: disable=broad-except
                                                     _log.exception(ex)
                                                     _, _, exc_tb = sys.exc_info()
                                                     self.adderror((QApplication.translate('Error Message','Exception:') + ' redraw() anno {0}').format(str(ex)),getattr(exc_tb, 'tb_lineno', '?'))
                                         except Exception as e: # pylint: disable=broad-except
                                             _log.exception(e)
+
+                            # Draw Roest-style markers: vertical dashed lines + NAME + BT temp on the line at top
+                            # Roest markers for MAIN roast events only (no control events)
+                            if self.is_roest_mode() and roest_events and self.ax is not None:
+                                roest_events_sorted = sorted(roest_events, key=lambda x: (x[0], x[2]))  # by time, then category
+                                # Blended transform: x=data coords, y=axes fraction (0=bottom, 1=top of ax)
+                                _trans_top = self.ax.get_xaxis_transform()
+                                # For anti-overlap of top labels: alternate between y=0.88 and y=0.73 if events are close
+                                _prev_t = None
+                                _lane = 0  # 0 or 1 for alternating y positions
+                                _y_lanes = [0.88, 0.73]
+                                for t, label, _ in roest_events_sorted:
+                                    # Anti-overlap: if events within 15 seconds, alternate lane
+                                    if _prev_t is not None and abs(t - _prev_t) < 15:
+                                        _lane = 1 - _lane
+                                    else:
+                                        _lane = 0
+                                    _prev_t = t
+                                    # 1) Vertical dashed guide line on ax_roast
+                                    vl = self.ax.axvline(t, color='#444444', linestyle=':', linewidth=1, alpha=0.6, zorder=50)
+                                    self.l_roest_vlines.append(vl)
+                                    # Mirror on ax_controls
+                                    if self.ax_controls is not None:
+                                        vl_ctrl = self.ax_controls.axvline(t, color='#444444', linestyle=':', linewidth=1, alpha=0.5, zorder=50)
+                                        self.l_roest_vlines.append(vl_ctrl)
+                                    # 2) Compute BT temperature at event time x
+                                    bt_temp = None
+                                    if len(self.timex) > 0 and len(self.temp2) == len(self.timex):
+                                        # Find nearest index
+                                        _idx = min(range(len(self.timex)), key=lambda i: abs(self.timex[i] - t))
+                                        if self.temp2[_idx] is not None and self.temp2[_idx] > 0:
+                                            bt_temp = self.temp2[_idx]
+                                    # 3) Event NAME + BT temp on the vertical line at top
+                                    # Format: "EVENT 165.0°C" (name above, temp below, fixed gap, no overlap)
+                                    _y_top = _y_lanes[_lane]
+                                    temp_unit = self.mode  # 'C' or 'F'
+                                    label_fontprop = _safe_regular_fontproperties(size=9.0)   # never raises
+                                    temp_fontprop = _safe_bold_fontproperties(size=9.0)       # never raises
+                                    if bt_temp is not None:
+                                        # Event name (normal, above) + Temperature (bold, below)
+                                        temp_str = f'{bt_temp:.1f}°{temp_unit}'
+                                        label_str = self.aw.arabicReshape(label)
+                                        # Create event name text (above, at original y position)
+                                        name_text = self.ax.text(
+                                            t, _y_top, label_str,
+                                            transform=_trans_top,
+                                            rotation=90, va='top', ha='center',
+                                            fontproperties=label_fontprop,
+                                            color=self.palette['text'],
+                                            zorder=70,
+                                            clip_on=False
+                                        )
+                                        name_text.set_in_layout(False)
+                                        self.l_roest_labels.append(name_text)
+                                        # Create bold temp text (below name, offset based on label length)
+                                        # Dynamic offset: ~0.014 per character + small fixed gap
+                                        _label_offset = len(label_str) * 0.014 + 0.025
+                                        _y_temp = _y_top - _label_offset
+                                        temp_text = self.ax.text(
+                                            t, _y_temp, temp_str,
+                                            transform=_trans_top,
+                                            rotation=90, va='top', ha='center',
+                                            fontproperties=temp_fontprop,
+                                            color=self.palette['text'],
+                                            zorder=70,
+                                            clip_on=False
+                                        )
+                                        temp_text.set_in_layout(False)
+                                        self.l_roest_labels.append(temp_text)
+                                    else:
+                                        # No temperature, just event name (normal weight)
+                                        label_text = self.aw.arabicReshape(label)
+                                        name_text = self.ax.text(
+                                            t, _y_top, label_text,
+                                            transform=_trans_top,
+                                            rotation=90, va='top', ha='center',
+                                            fontproperties=label_fontprop,
+                                            color=self.palette['text'],
+                                            zorder=70,
+                                            clip_on=False
+                                        )
+                                        name_text.set_in_layout(False)
+                                        self.l_roest_labels.append(name_text)
 
                             E1x:list[float|None]
                             E1y:list[float|None]
@@ -10779,17 +13225,32 @@ class tgraphcanvas(QObject):
                                 if E1_CHARGE is not None and len(E1y)>1 and E1y[0] != E1_CHARGE:
                                     E1x = list([self.timex[self.timeindex[0]]] + E1x)
                                     E1y = list([E1_CHARGE] + E1y)
+                                if self.ax_controls is not None:
+                                    E1y_pct = list(E1values_pct)
+                                    if len(E1y_pct) < len(E1y):
+                                        E1y_pct.append(float(max(0, int(round((self.specialeventsvalue[E1_last]-1)*10)))))
+                                    if E1_CHARGE_pct is not None and len(E1y_pct) > 1 and E1y_pct[0] != E1_CHARGE_pct:
+                                        E1y_pct = [E1_CHARGE_pct] + E1y_pct
+                                else:
+                                    E1y_pct = None
                                 ds = 'steps-post'
                             else:
                                 E1x = [None]
                                 E1y = [None]
+                                E1y_pct = None
                                 ds = 'steps-post'
-                            self.l_eventtype1dots, = self.ax.plot(numpy.array(E1x), numpy.array(E1y), color=self.EvalueColor[0],
+                            _ax_ev = self.ax_controls if (self.ax_controls is not None and self.eventsGraphflag in {2, 3, 4}) else self.ax
+                            _y_ev = (E1y_pct if E1y_pct is not None else E1y)
+                            # Replace None with NaN for numpy compatibility
+                            _y_arr = numpy.array([numpy.nan if v is None else v for v in _y_ev], dtype=float)
+                            if _ax_ev == self.ax_controls:
+                                _y_arr = numpy.clip(_y_arr, 0, 100)
+                            self.l_eventtype1dots, = _ax_ev.plot(numpy.array(E1x), _y_arr, color=self.EvalueColor[0],
                                                                 marker = (self.EvalueMarker[0] if self.eventsGraphflag != 4 else None),
                                                                 markersize = self.EvalueMarkerSize[0],
                                                                 picker=True,
                                                                 pickradius=4,#markevery=every,
-                                                                linestyle='-',drawstyle=ds,linewidth = self.Evaluelinethickness[0],alpha = self.Evaluealpha[0],label=self.etypesf(0))
+                                                                linestyle='-',drawstyle=ds,linewidth = self.Evaluelinethickness[0],alpha = self.Evaluealpha[0],label=self.etypesf(0), clip_on=True)
                             if len(self.E2timex) > 0 and len(self.E2values) == len(self.E2timex):
                                 pos = max(0,int(round((self.specialeventsvalue[E2_last]-1)*10)))
                                 if not self.clampEvents: # in clamp mode we render also event values higher than 100:
@@ -10806,17 +13267,32 @@ class tgraphcanvas(QObject):
                                 if E2_CHARGE is not None and len(E2y)>1 and E2y[0] != E2_CHARGE:
                                     E2x = list([self.timex[self.timeindex[0]]] + E2x)
                                     E2y = list([E2_CHARGE] + E2y)
+                                if self.ax_controls is not None:
+                                    E2y_pct = list(E2values_pct)
+                                    if len(E2y_pct) < len(E2y):
+                                        E2y_pct.append(float(max(0, int(round((self.specialeventsvalue[E2_last]-1)*10)))))
+                                    if E2_CHARGE_pct is not None and len(E2y_pct) > 1 and E2y_pct[0] != E2_CHARGE_pct:
+                                        E2y_pct = [E2_CHARGE_pct] + E2y_pct
+                                else:
+                                    E2y_pct = None
                                 ds = 'steps-post'
                             else:
                                 E2x = [None]
                                 E2y = [None]
+                                E2y_pct = None
                                 ds = 'steps-post'
-                            self.l_eventtype2dots, = self.ax.plot(numpy.array(E2x), numpy.array(E2y), color=self.EvalueColor[1],
+                            _ax_ev = self.ax_controls if (self.ax_controls is not None and self.eventsGraphflag in {2, 3, 4}) else self.ax
+                            _y_ev = (E2y_pct if E2y_pct is not None else E2y)
+                            # Replace None with NaN for numpy compatibility
+                            _y_arr = numpy.array([numpy.nan if v is None else v for v in _y_ev], dtype=float)
+                            if _ax_ev == self.ax_controls:
+                                _y_arr = numpy.clip(_y_arr, 0, 100)
+                            self.l_eventtype2dots, = _ax_ev.plot(numpy.array(E2x), _y_arr, color=self.EvalueColor[1],
                                                                 marker = (self.EvalueMarker[1] if self.eventsGraphflag != 4 else None),
                                                                 markersize = self.EvalueMarkerSize[1],
                                                                 picker=True,
                                                                 pickradius=4,#markevery=every,
-                                                                linestyle='-',drawstyle=ds,linewidth = self.Evaluelinethickness[1],alpha = self.Evaluealpha[1],label=self.etypesf(1))
+                                                                linestyle='-',drawstyle=ds,linewidth = self.Evaluelinethickness[1],alpha = self.Evaluealpha[1],label=self.etypesf(1), clip_on=True)
                             if len(self.E3timex) > 0 and len(self.E3values) == len(self.E3timex):
                                 pos = max(0,int(round((self.specialeventsvalue[E3_last]-1)*10)))
                                 if not self.clampEvents: # in clamp mode we render also event values higher than 100:
@@ -10833,17 +13309,32 @@ class tgraphcanvas(QObject):
                                 if E3_CHARGE is not None and len(E3y)>1 and E3y[0] != E3_CHARGE:
                                     E3x = list([self.timex[self.timeindex[0]]] + E3x)
                                     E3y = list([E3_CHARGE] + E3y)
+                                if self.ax_controls is not None:
+                                    E3y_pct = list(E3values_pct)
+                                    if len(E3y_pct) < len(E3y):
+                                        E3y_pct.append(float(max(0, int(round((self.specialeventsvalue[E3_last]-1)*10)))))
+                                    if E3_CHARGE_pct is not None and len(E3y_pct) > 1 and E3y_pct[0] != E3_CHARGE_pct:
+                                        E3y_pct = [E3_CHARGE_pct] + E3y_pct
+                                else:
+                                    E3y_pct = None
                                 ds = 'steps-post'
                             else:
                                 E3x = [None]
                                 E3y = [None]
+                                E3y_pct = None
                                 ds = 'steps-post'
-                            self.l_eventtype3dots, = self.ax.plot(numpy.array(E3x), numpy.array(E3y), color=self.EvalueColor[2],
+                            _ax_ev = self.ax_controls if (self.ax_controls is not None and self.eventsGraphflag in {2, 3, 4}) else self.ax
+                            _y_ev = (E3y_pct if E3y_pct is not None else E3y)
+                            # Replace None with NaN for numpy compatibility
+                            _y_arr = numpy.array([numpy.nan if v is None else v for v in _y_ev], dtype=float)
+                            if _ax_ev == self.ax_controls:
+                                _y_arr = numpy.clip(_y_arr, 0, 100)
+                            self.l_eventtype3dots, = _ax_ev.plot(numpy.array(E3x), _y_arr, color=self.EvalueColor[2],
                                                                 marker = (self.EvalueMarker[2] if self.eventsGraphflag != 4 else None),
                                                                 markersize = self.EvalueMarkerSize[2],
                                                                 picker=True,
                                                                 pickradius=4,#markevery=every,
-                                                                linestyle='-',drawstyle=ds,linewidth = self.Evaluelinethickness[2],alpha = self.Evaluealpha[2],label=self.etypesf(2))
+                                                                linestyle='-',drawstyle=ds,linewidth = self.Evaluelinethickness[2],alpha = self.Evaluealpha[2],label=self.etypesf(2), clip_on=True)
                             if len(self.E4timex) > 0 and len(self.E4values) == len(self.E4timex):
                                 pos = max(0,int(round((self.specialeventsvalue[E4_last]-1)*10)))
                                 if not self.clampEvents: # in clamp mode we render also event values higher than 100:
@@ -10860,22 +13351,40 @@ class tgraphcanvas(QObject):
                                 if E4_CHARGE is not None and len(E4y)>1 and E4y[0] != E4_CHARGE:
                                     E4x = list([self.timex[self.timeindex[0]]] + E4x)
                                     E4y = list([E4_CHARGE] + E4y)
+                                if self.ax_controls is not None:
+                                    E4y_pct = list(E4values_pct)
+                                    if len(E4y_pct) < len(E4y):
+                                        E4y_pct.append(float(max(0, int(round((self.specialeventsvalue[E4_last]-1)*10)))))
+                                    if E4_CHARGE_pct is not None and len(E4y_pct) > 1 and E4y_pct[0] != E4_CHARGE_pct:
+                                        E4y_pct = [E4_CHARGE_pct] + E4y_pct
+                                else:
+                                    E4y_pct = None
                                 ds = 'steps-post'
                             else:
                                 E4x = [None]
                                 E4y = [None]
+                                E4y_pct = None
                                 ds = 'steps-post'
-                            self.l_eventtype4dots, = self.ax.plot(numpy.array(E4x), numpy.array(E4y), color=self.EvalueColor[3],
+                            _ax_ev = self.ax_controls if (self.ax_controls is not None and self.eventsGraphflag in {2, 3, 4}) else self.ax
+                            _y_ev = (E4y_pct if E4y_pct is not None else E4y)
+                            # Replace None with NaN for numpy compatibility
+                            _y_arr = numpy.array([numpy.nan if v is None else v for v in _y_ev], dtype=float)
+                            if _ax_ev == self.ax_controls:
+                                _y_arr = numpy.clip(_y_arr, 0, 100)
+                            self.l_eventtype4dots, = _ax_ev.plot(numpy.array(E4x), _y_arr, color=self.EvalueColor[3],
                                                                 marker = (self.EvalueMarker[3] if self.eventsGraphflag != 4 else None),
                                                                 markersize = self.EvalueMarkerSize[3],
                                                                 picker=True,
                                                                 pickradius=4,#markevery=every,
-                                                                linestyle='-',drawstyle=ds,linewidth = self.Evaluelinethickness[3],alpha = self.Evaluealpha[3],label=self.etypesf(3))
+                                                                linestyle='-',drawstyle=ds,linewidth = self.Evaluelinethickness[3],alpha = self.Evaluealpha[3],label=self.etypesf(3), clip_on=True)
                         if Nevents:
                             evalues:list[list[float]] = [[],[],[],[]]
+                            evalues_pct:list[list[float]] = [[],[],[],[]]
                             if self.eventsGraphflag == 4:
                                 # we prepare copies of the Evalues
                                 evalues = [self.E1values[:],self.E2values[:],self.E3values[:],self.E4values[:]]
+                                if self.ax_controls is not None:
+                                    evalues_pct = [E1values_pct[:], E2values_pct[:], E3values_pct[:], E4values_pct[:]]
                             for i in range(Nevents):
                                 event_idx = int(self.specialevents[i])
                                 try:
@@ -10911,6 +13420,7 @@ class tgraphcanvas(QObject):
                                                 tempo = self.stemp2[event_idx]
                                         else:
                                             tempo = None
+                                        tempo_display:float|None = tempo
 
                                         if not self.flagstart and not self.foregroundShowFullflag and (((not self.autotimex or self.autotimexMode == 0) and event_idx < charge_idx) or event_idx > drop_idx):
                                             continue
@@ -10919,6 +13429,11 @@ class tgraphcanvas(QObject):
                                         if self.eventsGraphflag == 4 and self.specialeventstype[i] < 4 and self.showEtypes[self.specialeventstype[i]] and len(evalues[self.specialeventstype[i]])>0:
                                             tempo = evalues[self.specialeventstype[i]][0]
                                             evalues[self.specialeventstype[i]] = evalues[self.specialeventstype[i]][1:]
+                                            if self.ax_controls is not None and len(evalues_pct[self.specialeventstype[i]]) > 0:
+                                                tempo_display = evalues_pct[self.specialeventstype[i]][0]
+                                                evalues_pct[self.specialeventstype[i]] = evalues_pct[self.specialeventstype[i]][1:]
+                                            else:
+                                                tempo_display = tempo
 
                                         if tempo is not None and self.showEtypes[self.specialeventstype[i]]:
                                             if self.specialeventstype[i] == 0:
@@ -10973,8 +13488,10 @@ class tgraphcanvas(QObject):
                                             elif self.eventsGraphflag == 4:
                                                 if thirdletter != '':
                                                     firstletter = ''
-                                                anno = self.ax.annotate(f'{firstletter}{secondletter}{thirdletter}', xy=(self.timex[event_idx], tempo),
-                                                             xytext=(self.timex[event_idx],tempo),
+                                                _ax_flag = self.ax_controls if (self.ax_controls is not None and self.specialeventstype[i] < 4) else self.ax
+                                                _y_flag = (tempo_display if (self.ax_controls is not None and self.specialeventstype[i] < 4 and tempo_display is not None) else tempo)
+                                                anno = _ax_flag.annotate(f'{firstletter}{secondletter}{thirdletter}', xy=(self.timex[event_idx], _y_flag),
+                                                             xytext=(self.timex[event_idx],_y_flag),
                                                              alpha=0.9,
                                                              color=textcolor,
                                                              va='center', ha='center',
@@ -11192,6 +13709,19 @@ class tgraphcanvas(QObject):
                         visible_et = numpy.array(self.stemp1)
                         visible_bt = numpy.array(self.stemp2)
 
+                    # #region agent log (hypothesis H4: before drawET/drawBT)
+                    try:
+                        _ax = self.ax
+                        _bounds = list(_ax.get_position().bounds) if _ax is not None else None
+                        _cursor_debug_log('before_drawET_drawBT', {
+                            'ax_exists': _ax is not None,
+                            'ax_bounds': _bounds,
+                            'ax_height_pct': round(_bounds[3] * 100, 2) if _bounds and len(_bounds) >= 4 else None,
+                            'timex_len': len(self.timex) if self.timex else 0,
+                        }, hypothesis_id='H4', location='canvas.py:before_drawET_drawBT')
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                    # #endregion
                     if self.swaplcds:
                         self.drawET(visible_et)
                         self.drawBT(visible_bt)
@@ -11218,6 +13748,42 @@ class tgraphcanvas(QObject):
                             self.labels.append(f'{self.aw.arabicReshape(self.aw.BTname)}{deltaLabelMathPrefix}')
                         else:
                             self.labels.append(f'{deltaLabelMathPrefix}{self.aw.BTname}')
+
+                    _redraw_stage = 'AFTER_BT_ET'
+
+                    # Roast-like: ensure BT/ET/RoR curves stay on top and visible (nothing later draws over them)
+                    if getattr(self, 'roast_layout_like', False) and self.ax is not None:
+                        for _line in (self.l_temp1, self.l_temp2, self.l_delta1, self.l_delta2):
+                            if _line is not None:
+                                _line.set_zorder(10)
+                                _line.set_visible(True)
+
+                    # ROAST_DEBUG-only invariant: ET/BT presence and visibility (single JSON line)
+                    if os.environ.get('ROAST_DEBUG') == '1':
+                        def _et_bt_invariant() -> dict[str, Any]:
+                            ax_id = id(self.ax) if self.ax is not None else None
+                            bg = str(self.palette.get('background', ''))
+                            def _line_info(ln: Any, name: str) -> dict[str, Any]:
+                                if ln is None:
+                                    return {'present': False, 'visible': False, 'color': None, 'alpha': None, 'zorder': None, 'axes_id': None}
+                                return {
+                                    'present': True,
+                                    'visible': bool(ln.get_visible()),
+                                    'color': str(ln.get_color()),
+                                    'alpha': ln.get_alpha(),
+                                    'zorder': ln.get_zorder(),
+                                    'axes_id': id(ln.axes) if getattr(ln, 'axes', None) else None,
+                                    'axes_is_roast': id(ln.axes) == ax_id if getattr(ln, 'axes', None) else False,
+                                    'linewidth': ln.get_linewidth(),
+                                }
+                            return {
+                                'ET': _line_info(self.l_temp1, 'ET'),
+                                'BT': _line_info(self.l_temp2, 'BT'),
+                                'ax_roast_id': ax_id,
+                                'background_color': bg,
+                            }
+                        inv = _et_bt_invariant()
+                        write_debug_artifact(json.dumps({'ET_BT_invariant': inv}, default=str))
 
                     nrdevices = len(self.extradevices)
 
@@ -11252,15 +13818,19 @@ class tgraphcanvas(QObject):
                         if E1_nonempty and self.showEtypes[0] and self.l_eventtype1dots is not None:
                             self.handles.append(self.l_eventtype1dots)
                             self.labels.append(self.aw.arabicReshape(self.etypesf(0)))
+                            self.legend_series_keys.append(('E', 0))
                         if E2_nonempty and self.showEtypes[1] and self.l_eventtype2dots is not None:
                             self.handles.append(self.l_eventtype2dots)
                             self.labels.append(self.aw.arabicReshape(self.etypesf(1)))
+                            self.legend_series_keys.append(('E', 1))
                         if E3_nonempty and self.showEtypes[2] and self.l_eventtype3dots is not None:
                             self.handles.append(self.l_eventtype3dots)
                             self.labels.append(self.aw.arabicReshape(self.etypesf(2)))
+                            self.legend_series_keys.append(('E', 2))
                         if E4_nonempty and self.showEtypes[3] and self.l_eventtype4dots is not None:
                             self.handles.append(self.l_eventtype4dots)
                             self.labels.append(self.aw.arabicReshape(self.etypesf(3)))
+                            self.legend_series_keys.append(('E', 3))
 
                     if not self.designerflag:
                         if self.BTcurve or self.ETcurve:
@@ -11270,17 +13840,37 @@ class tgraphcanvas(QObject):
                             else:
                                 temp_curve = self.temp1
                                 stemp_curve_foreground = self.stemp1
+                            # D) Skip classic event annotations in Roast-like + Roest mode (only Roest markers)
+                            _skip_classic_annos = self.is_roest_mode()
+                            _redraw_stage = 'BEFORE_ANNOTATIONS'
+                            # #region agent log (H4: check ylimit values before place_annotations)
+                            if _ROAST_DEBUG_ENABLED:
+                                debug_checkpoint('H4_BEFORE_ANNOTATIONS', {
+                                    'hypothesisId': 'H4',
+                                    'ylimit': self.ylimit,
+                                    'ylimit_min': self.ylimit_min,
+                                    'ylimit_valid': _is_valid_number(self.ylimit),
+                                    'ylimit_min_valid': _is_valid_number(self.ylimit_min),
+                                    'flagstart': self.flagstart,
+                                    'skip_classic_annos': _skip_classic_annos,
+                                })
+                            # #endregion
                             if self.flagstart: # no smoothed lines in this case, pass normal BT
-                                self.l_annotations = self.place_annotations(
-                                    self.TPalarmtimeindex,
-                                    self.ylimit - self.ylimit_min,
-                                    self.timex,self.timeindex,
-                                    temp_curve, temp_curve)
+                                if not _skip_classic_annos:
+                                    # Safe computation of d: guard against None ylimit values
+                                    _d_val = (self.ylimit - self.ylimit_min) if (_is_valid_number(self.ylimit) and _is_valid_number(self.ylimit_min)) else 400.0
+                                    self.l_annotations = self.place_annotations(
+                                        self.TPalarmtimeindex,
+                                        _d_val,
+                                        self.timex,self.timeindex,
+                                        temp_curve, temp_curve)
                             else:
                                 TP_index = self.aw.findTP()
-                                if self.annotationsflag != 0:
+                                if self.annotationsflag != 0 and not _skip_classic_annos:
+                                    # Safe computation of d: guard against None ylimit values
+                                    _d_val = (self.ylimit - self.ylimit_min) if (_is_valid_number(self.ylimit) and _is_valid_number(self.ylimit_min)) else 400.0
                                     self.l_annotations = self.place_annotations(
-                                        TP_index,self.ylimit - self.ylimit_min,
+                                        TP_index, _d_val,
                                         self.timex,
                                         self.timeindex,
                                         temp_curve,
@@ -11369,7 +13959,8 @@ class tgraphcanvas(QObject):
                 # add projection and AUC guide lines last as those are removed by updategraphics for optimized redrawing and not cached
                 if self.ETprojectFlag:
                     if self.ETcurve:
-                        self.l_ETprojection, = self.ax.plot(self.ETprojection_tx, self.ETprojection_temp,color = self.palette['et'],
+                        _et_col = self.palette.get('et') or '#1f77b4'
+                        self.l_ETprojection, = self.ax.plot(self.ETprojection_tx, self.ETprojection_temp,color = _et_col,
                                                     dashes=dashes_setup,
                                                     label=self.aw.arabicReshape(QApplication.translate('Label', 'ETprojection')),
                                                     linestyle = '-.', linewidth= 8, alpha = .3,sketch_params=None,path_effects=[])
@@ -11403,14 +13994,193 @@ class tgraphcanvas(QObject):
                                                 label=self.aw.arabicReshape(QApplication.translate('Label', 'AUCguide')),
                                                 linestyle = '-', linewidth= 1, alpha = .5,sketch_params=None,path_effects=[])
 
+                # Roast-like: BT/ET/RoR must stay on top after projections/timeline/AUC (all added to self.ax above)
+                if getattr(self, 'roast_layout_like', False) and self.ax is not None:
+                    for _line in (self.l_temp1, self.l_temp2, self.l_delta1, self.l_delta2):
+                        if _line is not None:
+                            _line.set_zorder(10)
+                            _line.set_visible(True)
+
                 ############  ready to plot ############
+                _redraw_stage = 'BEFORE_DRAW'
+                # #region agent log: AX_LAYOUT_SUMMARY (ROAST_DEBUG=1 only)
+                if os.environ.get('ROAST_DEBUG') == '1':
+                    def _ax_summary(ax: Any) -> str:
+                        if ax is None:
+                            return 'None'
+                        b = ax.get_position().bounds
+                        return f'h={b[3]*100:.1f}% z={ax.get_zorder()} L={len(ax.lines)} T={len(ax.texts)}'
+                    issues = []
+                    if self.ax:
+                        ax_h = self.ax.get_position().bounds[3]
+                        if ax_h < 0.3:
+                            issues.append(f'ax_height_low({ax_h:.2f})')
+                    if self.ax_events and self.ax_events.patch.get_visible():
+                        issues.append('ax_events_patch_visible')
+                    if self._phases_bar_texts:
+                        hidden = sum(1 for t in self._phases_bar_texts if t and not t.get_visible())
+                        if hidden > 0:
+                            issues.append(f'phases_labels_hidden({hidden})')
+                    if self.l_temp1 is None and self.l_temp2 is None:
+                        issues.append('no_curves')
+                    debug_checkpoint('AX_LAYOUT_SUMMARY', {
+                        'mode': 'roast' if self.roast_layout_like else 'classic',
+                        'ax': _ax_summary(self.ax),
+                        'ax_events': _ax_summary(self.ax_events),
+                        'ax_controls': _ax_summary(self.ax_controls),
+                        'ax_phases': _ax_summary(self.ax_phases),
+                        'curves': f'ET={self.l_temp1 is not None} BT={self.l_temp2 is not None}',
+                        'phases_labels': len(self._phases_bar_texts) if self._phases_bar_texts else 0,
+                        'issues': issues if issues else 'OK',
+                    })
+                    # (Debug facecolors and AX_* labels removed: never draw in UI; use ROAST_DEBUG logs only.)
+
+                    # Log exact visibility params for BT/ET lines (ROAST_DEBUG only)
+                    def _line_vis(line: Any, name: str) -> dict[str, Any]:
+                        if line is None:
+                            return {'name': name, 'exists': False}
+                        return {
+                            'name': name,
+                            'visible': line.get_visible(),
+                            'alpha': line.get_alpha(),
+                            'color': str(line.get_color()),
+                            'linewidth': line.get_linewidth(),
+                            'zorder': line.get_zorder(),
+                            'data_len': len(line.get_xdata()) if hasattr(line, 'get_xdata') else 0,
+                            'axes_id': id(line.axes) if hasattr(line, 'axes') and line.axes else None,
+                        }
+                    # Log exact visibility params for phases texts
+                    def _text_vis(txt: Any, idx: int) -> dict[str, Any]:
+                        if txt is None:
+                            return {'idx': idx, 'exists': False}
+                        return {
+                            'idx': idx,
+                            'visible': txt.get_visible(),
+                            'alpha': txt.get_alpha(),
+                            'color': str(txt.get_color()),
+                            'zorder': txt.get_zorder(),
+                            'clip_on': txt.get_clip_on(),
+                            'text': txt.get_text()[:30] if txt.get_text() else '',
+                            'position': list(txt.get_position()),
+                        }
+                    # Log axis params
+                    def _ax_vis(ax: Any, name: str) -> dict[str, Any]:
+                        if ax is None:
+                            return {'name': name, 'exists': False}
+                        pos = ax.get_position()
+                        return {
+                            'name': name,
+                            'bounds': [round(x, 4) for x in pos.bounds],
+                            'patch_alpha': ax.patch.get_alpha(),
+                            'patch_visible': ax.patch.get_visible(),
+                            'facecolor': str(ax.get_facecolor()),
+                            'visible': ax.get_visible(),
+                            'zorder': ax.get_zorder(),
+                        }
+                    debug_checkpoint('VISIBILITY_DIAGNOSTIC', {
+                        'lines': {
+                            'l_temp1_ET': _line_vis(self.l_temp1, 'ET'),
+                            'l_temp2_BT': _line_vis(self.l_temp2, 'BT'),
+                            'l_delta1': _line_vis(self.l_delta1, 'RoR_ET'),
+                            'l_delta2': _line_vis(self.l_delta2, 'RoR_BT'),
+                        },
+                        'phases_texts': [_text_vis(t, i) for i, t in enumerate(self._phases_bar_texts or [])],
+                        'axes': {
+                            'ax': _ax_vis(self.ax, 'ax'),
+                            'ax_events': _ax_vis(self.ax_events, 'ax_events'),
+                            'ax_controls': _ax_vis(self.ax_controls, 'ax_controls'),
+                            'ax_phases': _ax_vis(self.ax_phases, 'ax_phases'),
+                            'delta_ax': _ax_vis(self.delta_ax, 'delta_ax'),
+                        },
+                    })
+                    # #endregion
+                # #endregion
+                # #region agent log: bounds before updateBackground (H-A, H-E)
+                if _ROAST_DEBUG_ENABLED and self.roast_layout_like and self.ax is not None:
+                    def _b(a: Any) -> list[float]:
+                        return [round(x, 4) for x in a.get_position().bounds] if a is not None else []
+                    _cursor_debug_log('bounds_before_doUpdate', {
+                        'ax': _b(self.ax), 'ax_events': _b(self.ax_events),
+                        'ax_controls': _b(self.ax_controls), 'ax_phases': _b(self.ax_phases),
+                        'layout_engine': getattr(self.fig.get_layout_engine(), 'name', str(self.fig.get_layout_engine())),
+                    }, hypothesis_id='A,E', location='canvas.py:before_updateBackground')
+                # #endregion
                 self.updateBackground() # update bitlblit backgrounds
+                # #region agent log: ROAST_DEBUG one-time redraw assertion (fig/axis bboxes, blit coverage)
+                if _ROAST_DEBUG_ENABLED and self.roast_layout_like and self.ax is not None:
+                    try:
+                        _fig = self.fig
+                        _r = getattr(_fig.canvas, 'get_renderer', lambda: None)()
+                        _fig_bbox_px = _roast_debug_bbox_px(_fig.bbox)
+                        def _ax_bbox_px(ax: Any) -> list[float]:
+                            if ax is None or _r is None:
+                                return []
+                            try:
+                                return _roast_debug_bbox_px(ax.get_window_extent(renderer=_r))
+                            except Exception:  # pylint: disable=broad-except
+                                return []
+                        _ax_roast_px = _ax_bbox_px(self.ax)
+                        _ax_controls_px = _ax_bbox_px(getattr(self, 'ax_controls', None))
+                        _ax_phases_px = _ax_bbox_px(getattr(self, 'ax_phases', None))
+                        # doUpdate uses axfig.bbox (figure bbox) for blit; check if it fully contains ax (roast) in pixels
+                        _covers = False
+                        if len(_fig_bbox_px) >= 4 and len(_ax_roast_px) >= 4:
+                            _fx0, _fy0, _fw, _fh = _fig_bbox_px[0], _fig_bbox_px[1], _fig_bbox_px[2], _fig_bbox_px[3]
+                            _ax0, _ay0, _aw, _ah = _ax_roast_px[0], _ax_roast_px[1], _ax_roast_px[2], _ax_roast_px[3]
+                            _covers = (_fx0 <= _ax0 and _fy0 <= _ay0 and
+                                       _fx0 + _fw >= _ax0 + _aw and _fy0 + _fh >= _ay0 + _ah)
+                        _cursor_debug_log('redraw_assertion_bboxes', {
+                            'fig_bbox_px': _fig_bbox_px,
+                            'ax_roast_bbox_px': _ax_roast_px,
+                            'ax_controls_bbox_px': _ax_controls_px,
+                            'ax_phases_bbox_px': _ax_phases_px,
+                            'blit_bbox_covers_ax_roast': _covers,
+                            'note': 'doUpdate blit uses fig.bbox; True means full-fig blit should include top axis'
+                        }, hypothesis_id='blit_diag', location='canvas.py:redraw')
+                    except Exception as _e:  # pylint: disable=broad-except
+                        _cursor_debug_log('redraw_assertion_error', {'error': repr(_e)}, hypothesis_id='blit_diag', location='canvas.py:redraw')
+                # #endregion
+                _redraw_stage = 'COMPLETE'
                 #######################################
 
             except Exception as ex: # pylint: disable=broad-except
+                import traceback
                 _log.exception(ex)
                 _, _, exc_tb = sys.exc_info()
-                self.adderror((QApplication.translate('Error Message','Exception:') + ' redraw() {0}').format(str(ex)),getattr(exc_tb, 'tb_lineno', '?'))
+                tb_lineno = getattr(exc_tb, 'tb_lineno', '?')
+                self.adderror((QApplication.translate('Error Message','Exception:') + ' redraw() {0}').format(str(ex)), tb_lineno)
+                # #region agent log (hypothesis H5: redraw exception - always log to session)
+                try:
+                    _cursor_debug_log('redraw_exception', {
+                        'stage': _redraw_stage,
+                        'exception': repr(ex),
+                        'tb_lineno': tb_lineno,
+                        'roast_layout_like': getattr(self, 'roast_layout_like', None),
+                        'ax_exists': self.ax is not None,
+                    }, hypothesis_id='H5', location='canvas.py:redraw_exception')
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                # #endregion
+                # Enhanced debug logging: stage, traceback, key values
+                if _ROAST_DEBUG_ENABLED:
+                    debug_checkpoint('REDRAW_EXCEPTION', {
+                        'stage': _redraw_stage,
+                        'exception': repr(ex),
+                        'tb_lineno': tb_lineno,
+                        'traceback': traceback.format_exc(),
+                        'roast_layout_like': getattr(self, 'roast_layout_like', None),
+                        'event_style': getattr(self, 'event_style', None),
+                        'forceRenewAxis': forceRenewAxis if 'forceRenewAxis' in dir() else None,
+                        'has_roast_like_axes': (self.ax_events is not None and self.ax_controls is not None and self.ax_phases is not None),
+                        'ax_xlim': list(self.ax.get_xlim()) if self.ax is not None else None,
+                        'ax_ylim': list(self.ax.get_ylim()) if self.ax is not None else None,
+                        'ylimit': self.ylimit,
+                        'ylimit_min': self.ylimit_min,
+                        'timex_len': len(self.timex) if self.timex else 0,
+                        'temp1_len': len(self.temp1) if self.temp1 else 0,
+                        'temp2_len': len(self.temp2) if self.temp2 else 0,
+                    })
+                # NOTE: Do NOT call fig.clf() here - preserve previous drawing to avoid blank canvas
             finally:
                 # we initialize at the end of the redraw the event and flag annotation custom position loaded from a profile as those should have been consumed by now
                 self.l_annotations_pos_dict = {}
@@ -11421,6 +14191,10 @@ class tgraphcanvas(QObject):
 
                 self.setProfileBackgroundTitle(titleB)
 
+                # Roest hover: create vlines/HUD on first redraw with data so hover works without toggling layout
+                if self.roast_layout_like and len(self.timex) > 0:
+                    self._ensure_roest_hover_initialized()
+
                 # to allow the fit_title to work on the proper value we ping the redraw explicitly again after processing events
                 # we need to use draw_idle here to allow Qt for relayout event processing
                 # calling QApplication.processEvents() is not an option here as the event loop might not have been started yet
@@ -11428,6 +14202,7 @@ class tgraphcanvas(QObject):
 
                 # also the background title set above is not always redrawn and sometimes requires a window resiize to trigger the redraw without the draw_idle() below
 
+                self.ensure_hover_connected()
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
                     self.fig.canvas.draw_idle()
@@ -12379,7 +15154,22 @@ class tgraphcanvas(QObject):
     # adjusts height of annotations
     #supporting function for self.redraw() used to find best height of annotations in graph to avoid annotating over previous annotations (unreadable) when close to each other
     def findtextgap(self, ystep_down:int, ystep_up:int, height1:float, height2:float, dd:float = 0) -> tuple[int,int]:
-        d = self.ylimit - self.ylimit_min if dd <= 0 else dd
+        # Safe comparison: dd can be None or NaN; fall back to ylimit range if invalid
+        use_dd = _is_valid_number(dd) and dd > 0
+        if use_dd:
+            d = float(dd)
+        elif _is_valid_number(self.ylimit) and _is_valid_number(self.ylimit_min):
+            d = float(self.ylimit) - float(self.ylimit_min)
+        else:
+            # Fallback to a sensible default if limits are invalid
+            d = 400.0  # typical temperature range
+            if _ROAST_DEBUG_ENABLED:
+                debug_checkpoint('FINDTEXTGAP_FALLBACK', {
+                    'dd': dd,
+                    'ylimit': self.ylimit,
+                    'ylimit_min': self.ylimit_min,
+                    'd_fallback': d
+                })
         init = int(d/12.0)
         gap = int(d/20.0)
         maxx = int(d/3.6)
@@ -12746,6 +15536,7 @@ class tgraphcanvas(QObject):
         self.aw.updateCanvasColors()
         self.aw.applyStandardButtonVisibility()
         self.aw.update_extraeventbuttons_visibility()
+        self._roast_hover_ensure_artists()
         self.fig.canvas.draw_idle() #.redraw()
 
     def clearFlavorChart(self) -> None:
@@ -12769,6 +15560,7 @@ class tgraphcanvas(QObject):
             self.delta_ax = None
 
             self.fig.clf()
+            self.ax_background = None
 
             #create a new name ax1 instead of ax (ax is used when plotting profiles)
 
@@ -16275,7 +19067,8 @@ class tgraphcanvas(QObject):
                     statisticsupper = statisticsheight + statisticsbarheight + 10
                     statisticslower = statisticsheight - 2.5*statisticsbarheight
 
-                if self.statisticsflags[1]:
+                # Statistics phase bars on main axis (Classic only; Roast-like has phases on ax_phases strip)
+                if self.statisticsflags[1] and not self.roast_layout_like:
 
                     #Draw cool phase rectangle
                     if self.timeindex[7]:
@@ -16339,7 +19132,8 @@ class tgraphcanvas(QObject):
                 if TP_index >= 0:
                     LP = self.temp2[TP_index]
 
-                if self.statisticsflags[0]:
+                # Roast-like: time and % only on ax_phases (Roest phases bar), not on main chart
+                if self.statisticsflags[0] and not self.roast_layout_like:
                     if self.timeindex[0] > -1:
                         # only if CHARGE is set
                         if right_to_left(self.locale_str):
@@ -16391,7 +19185,8 @@ class tgraphcanvas(QObject):
 
                 st1 = st2 = st3 = st4 = ''
 
-                if self.statisticsflags[4] or self.statisticsflags[6]:
+                # Roast-like: phase RoR stats only on phases bar, not on main chart
+                if (self.statisticsflags[4] or self.statisticsflags[6]) and not self.roast_layout_like:
                     rates_of_changes = self.aw.RoR(TP_index,dryEndIndex)
                     d = str(self.LCDdecimalplaces)
                     if right_to_left(self.locale_str):
@@ -18225,10 +21020,22 @@ class tgraphcanvas(QObject):
                 # initialize bitblit background
                 axfig = self.ax.get_figure()
                 if axfig is not None and hasattr(self.fig.canvas,'copy_from_bbox'):
+                    # #region agent log: ROAST_DEBUG designer copy_from_bbox
+                    if _ROAST_DEBUG_ENABLED:
+                        _cursor_debug_log('redrawdesigner_copy_from_bbox', {
+                            'bbox_px': _roast_debug_bbox_px(axfig.bbox), 'axis_corresponds_to': 'fig', 'mode': 'designer'
+                        }, hypothesis_id='blit_diag', location='canvas.py:redrawdesigner')
+                    # #endregion
                     self.ax_background_designer = self.fig.canvas.copy_from_bbox(axfig.bbox)  # ty:ignore[call-non-callable]  # pyright: ignore[reportAttributeAccessIssue]
 
             # restore background
             if hasattr(self.fig.canvas,'restore_region'):
+                # #region agent log: ROAST_DEBUG designer restore_region
+                if _ROAST_DEBUG_ENABLED:
+                    _cursor_debug_log('redrawdesigner_restore_region', {
+                        'event': 'restore_region', 'axis_corresponds_to': 'fig', 'mode': 'designer'
+                    }, hypothesis_id='blit_diag', location='canvas.py:redrawdesigner')
+                # #endregion
                 self.fig.canvas.restore_region(self.ax_background_designer) # ty:ignore[call-non-callable] # pyright: ignore[reportAttributeAccessIssue]
 
 
@@ -18297,13 +21104,13 @@ class tgraphcanvas(QObject):
                 funcDelta2 = func2.derivative()
                 deltabtvals = funcDelta2(self.designer_timez) * 60
                 self.l_delta2.set_data(numpy.array(self.designer_timez), deltabtvals)
-                self.ax.draw_artist(self.l_delta2)
+                self.l_delta2.axes.draw_artist(self.l_delta2)
 
             if func1 is not None and self.DeltaETflag and self.l_delta1 is not None and self.designer_timez is not None: # type:ignore[redundant-expr] # ty:ignore[ignore]
                 funcDelta1 = func1.derivative()
                 deltaetvals = funcDelta1(self.designer_timez) * 60
                 self.l_delta1.set_data(numpy.array(self.designer_timez), deltaetvals)
-                self.ax.draw_artist(self.l_delta1)
+                self.l_delta1.axes.draw_artist(self.l_delta1)
 
             #add curves
             if etvals is not None and self.ETcurve and self.l_temp1 is not None: # type:ignore[redundant-expr] # ty:ignore[ignore]
@@ -18328,6 +21135,12 @@ class tgraphcanvas(QObject):
 
             afig = self.ax.get_figure()
             if afig is not None:
+                # #region agent log: ROAST_DEBUG designer blit (after draw_artist stats/markers)
+                if _ROAST_DEBUG_ENABLED:
+                    _cursor_debug_log('redrawdesigner_blit', {
+                        'bbox_px': _roast_debug_bbox_px(afig.bbox), 'axis_corresponds_to': 'fig', 'mode': 'designer'
+                    }, hypothesis_id='blit_diag', location='canvas.py:redrawdesigner')
+                # #endregion
                 self.fig.canvas.blit(afig.bbox)
             self.fig.canvas.flush_events()
 
@@ -18547,6 +21360,10 @@ class tgraphcanvas(QObject):
                                     self.ax.draw_artist(self._designer_orange_mark)
                                     afig = self.ax.get_figure()
                                     if afig is not None:
+                                        # #region agent log: ROAST_DEBUG designer blit orange
+                                        if _ROAST_DEBUG_ENABLED:
+                                            _cursor_debug_log('redrawdesigner_blit_orange', {'bbox_px': _roast_debug_bbox_px(afig.bbox), 'axis_corresponds_to': 'fig'}, hypothesis_id='blit_diag', location='canvas.py:redrawdesigner')
+                                        # #endregion
                                         self.fig.canvas.blit(afig.bbox)
                                     self.fig.canvas.flush_events()
                             elif self.ETcurve and abs(self.temp1[i] - ydata) < 10:
@@ -18557,6 +21374,10 @@ class tgraphcanvas(QObject):
                                     self.ax.draw_artist(self._designer_orange_mark)
                                     afig = self.ax.get_figure()
                                     if afig is not None:
+                                        # #region agent log: ROAST_DEBUG designer blit orange ET
+                                        if _ROAST_DEBUG_ENABLED:
+                                            _cursor_debug_log('redrawdesigner_blit_orange_et', {'bbox_px': _roast_debug_bbox_px(afig.bbox), 'axis_corresponds_to': 'fig'}, hypothesis_id='blit_diag', location='canvas.py:redrawdesigner')
+                                        # #endregion
                                         self.fig.canvas.blit(afig.bbox)
                                     self.fig.canvas.flush_events()
                             index = self.timeindex.index(i)
@@ -18595,6 +21416,10 @@ class tgraphcanvas(QObject):
                                 self.ax.draw_artist(self._designer_blue_mark)
 
                                 if axfig is not None:
+                                    # #region agent log: ROAST_DEBUG designer blit blue
+                                    if _ROAST_DEBUG_ENABLED:
+                                        _cursor_debug_log('redrawdesigner_blit_blue', {'bbox_px': _roast_debug_bbox_px(axfig.bbox), 'axis_corresponds_to': 'fig'}, hypothesis_id='blit_diag', location='canvas.py:redrawdesigner')
+                                    # #endregion
                                     self.fig.canvas.blit(axfig.bbox)
                                 self.fig.canvas.flush_events()
                         elif self.ETcurve and abs(self.temp1[i] - ydata) < 10:
@@ -18604,6 +21429,10 @@ class tgraphcanvas(QObject):
                                 self._designer_blue_mark.set_data([self.timex[i]],[self.temp1[i]])
                                 self.ax.draw_artist(self._designer_blue_mark)
                                 if axfig is not None:
+                                    # #region agent log: ROAST_DEBUG designer blit blue ET
+                                    if _ROAST_DEBUG_ENABLED:
+                                        _cursor_debug_log('redrawdesigner_blit_blue_et', {'bbox_px': _roast_debug_bbox_px(axfig.bbox), 'axis_corresponds_to': 'fig'}, hypothesis_id='blit_diag', location='canvas.py:redrawdesigner')
+                                    # #endregion
                                     self.fig.canvas.blit(axfig.bbox)
                                 self.fig.canvas.flush_events()
                         timez = stringfromseconds(self.timex[i] - self.timex[self.timeindex[0]])
@@ -19215,6 +22044,7 @@ class tgraphcanvas(QObject):
             ########################
             # same as redraw but using different axes
             self.fig.clf()
+            self.ax_background = None
             #create a new name ax1 instead of ax
             if self.ax2 is not None:
                 try:
@@ -19385,15 +22215,20 @@ class tgraphcanvas(QObject):
 #############################     MOUSE CROSS     #############################
 
     def togglecrosslines(self) -> None:
+        """Toggle classic mouse cross. Motion is handled only by onmove (single motion_notify handler)."""
         if not self.crossmarker and not self.designerflag and not self.flagon:  #if not projection flag
-            #turn ON
+            #turn ON: do not connect a second motion handler; onmove will call drawcross when crossmarker and not roast_layout_like
             self.l_horizontalcrossline = None
             self.l_verticalcrossline = None
             self.updateBackground() # update bitlblit backgrounds
             self.crossmarker = True
             message = QApplication.translate('Message', 'Mouse Cross ON: move mouse around')
             self.aw.sendmessage(message)
-            self.crossmouseid = self.fig.canvas.mpl_connect('motion_notify_event', cast('Callable[[Event],None]', self.drawcross))
+            if self.onreleaseid is not None:
+                try:
+                    self.fig.canvas.mpl_disconnect(self.onreleaseid)
+                except Exception:  # pylint: disable=broad-except
+                    pass
             self.onreleaseid = self.fig.canvas.mpl_connect('button_release_event', self.onrelease)  #mouse cross lines measurement
         else:
             #turn OFF
@@ -19402,8 +22237,9 @@ class tgraphcanvas(QObject):
             if self.crossmouseid is not None:
                 try:
                     self.fig.canvas.mpl_disconnect(self.crossmouseid)
-                except Exception: # pylint: disable=broad-except
+                except Exception:  # pylint: disable=broad-except
                     pass
+            self.crossmouseid = None
             if self.onreleaseid is not None:
                 try:
                     self.fig.canvas.mpl_disconnect(self.onreleaseid)  #mouse cross lines measurement
@@ -19441,6 +22277,9 @@ class tgraphcanvas(QObject):
             self.updateBackground() # update bitlblit backgrounds
 
     def drawcross(self, event:'MouseEvent') -> None:
+        # In roast-like mode only the unified roast hover runs; skip classic crosshair to avoid duplicates
+        if self.is_split_layout() or self.roast_layout_like:
+            return
         # do not interleave with redraw()
         gotlock = self.profileDataSemaphore.tryAcquire(1,0)
         if not gotlock:
@@ -19476,6 +22315,13 @@ class tgraphcanvas(QObject):
                         else:
                             self.l_verticalcrossline.set_xdata([x])
                         if self.ax_background:
+                            # #region agent log: ROAST_DEBUG crosshair restore_region
+                            if _ROAST_DEBUG_ENABLED:
+                                _cursor_debug_log('crosshair_restore_region', {
+                                    'event': 'restore_region', 'axis_corresponds_to': 'fig',
+                                    'note': 'ax_background (full figure)'
+                                }, hypothesis_id='blit_diag', location='canvas.py:crosshair')
+                            # #endregion
                             self.fig.canvas.restore_region(self.ax_background) # type: ignore[attr-defined]
                             self.ax.draw_artist(self.l_horizontalcrossline)
                             self.ax.draw_artist(self.l_verticalcrossline)
@@ -19483,7 +22329,15 @@ class tgraphcanvas(QObject):
                                 self.ax.draw_artist(self.base_horizontalcrossline)
                                 self.ax.draw_artist(self.base_verticalcrossline)
                             try:
-                                self.fig.canvas.blit(self.ax.get_tightbbox(self.fig.canvas.get_renderer())) # type: ignore[attr-defined]
+                                _blit_bbox = self.ax.get_tightbbox(self.fig.canvas.get_renderer()) # type: ignore[attr-defined]
+                                # #region agent log: ROAST_DEBUG crosshair blit (axis bbox only)
+                                if _ROAST_DEBUG_ENABLED:
+                                    _cursor_debug_log('crosshair_blit', {
+                                        'bbox_px': _roast_debug_bbox_px(_blit_bbox),
+                                        'axis_corresponds_to': 'ax', 'note': 'get_tightbbox(ax) - only roast axis region blitted'
+                                    }, hypothesis_id='blit_diag', location='canvas.py:crosshair')
+                                # #endregion
+                                self.fig.canvas.blit(_blit_bbox) # type: ignore[attr-defined]
                             except Exception: # pylint: disable=broad-except
                                 pass
                         else:

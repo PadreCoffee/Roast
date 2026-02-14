@@ -24,6 +24,7 @@ import os
 import pathlib
 import subprocess
 import plistlib
+import platform
 from PyInstaller.utils.hooks import get_package_paths
 
 import sys
@@ -36,6 +37,47 @@ block_cipher = None
 # current version
 VERSION = artisanlib.__version__
 LICENSE = 'GNU General Public License (GPL)'
+
+# Build architecture.
+# Default follows the current machine architecture, but can be overridden, e.g.:
+#   TARGET_ARCH=arm64 pyinstaller artisan-mac.spec
+#   TARGET_ARCH=universal2 pyinstaller artisan-mac.spec
+DEFAULT_TARGET_ARCH = 'arm64' if platform.machine() == 'arm64' else 'x86_64'
+TARGET_ARCH = os.environ.get('TARGET_ARCH', DEFAULT_TARGET_ARCH)
+
+# macOS Info.plist architecture priority (universal2 is not a CPU arch name).
+LS_ARCHITECTURE_PRIORITY = ['arm64', 'x86_64'] if TARGET_ARCH == 'universal2' else [TARGET_ARCH]
+
+# #region agent log
+def _agent_log(hypothesisId: str, location: str, message: str, data: dict) -> None:
+    # NDJSON debug log for build diagnostics (no secrets).
+    try:
+        import json, time  # pylint: disable=import-outside-toplevel
+        with open('/Users/lectrisheep/Documents/Projects/Roast/.cursor/debug.log', 'a', encoding='utf-8') as f:
+            f.write(json.dumps({
+                'timestamp': int(time.time() * 1000),
+                'runId': 'build-spec',
+                'hypothesisId': hypothesisId,
+                'location': location,
+                'message': message,
+                'data': data,
+            }, ensure_ascii=False) + '\n')
+    except Exception as e:
+        # Fall back to stderr so we still get runtime evidence in PyInstaller output.
+        try:
+            import sys  # pylint: disable=import-outside-toplevel
+            print(f'[agent_log_failed] {location} {message}: {e!r}', file=sys.stderr)
+        except Exception:
+            pass
+
+_agent_log('A', 'artisan-mac.spec:arch', 'Computed target architecture', {
+    'platform_machine': platform.machine(),
+    'default_target_arch': DEFAULT_TARGET_ARCH,
+    'env_TARGET_ARCH': os.environ.get('TARGET_ARCH'),
+    'TARGET_ARCH': TARGET_ARCH,
+    'LS_ARCHITECTURE_PRIORITY': LS_ARCHITECTURE_PRIORITY,
+})
+# #endregion agent log
 
 try:
     PYTHON_V = os.environ["PYTHON_V"]
@@ -93,6 +135,8 @@ DATA_FILES = [
         (r'includes/roast-template.htm', '.'),
         (r'includes/ranking-template.htm', '.'),
         (r'includes/Humor-Sans.ttf', '.'),
+        (r'includes/Roboto-Regular.ttf', '.'),
+        (r'includes/Roboto-Bold.ttf', '.'),
         (r'includes/WenQuanYiZenHei-01.ttf', '.'),
         (r'includes/WenQuanYiZenHeiMonoMedium.ttf', '.'),
         (r'includes/SourceHanSansCN-Regular.otf', '.'),
@@ -160,7 +204,7 @@ exe = EXE(pyz,
             console=False,
             disable_windowed_traceback=False,
             argv_emulation=False, # False for GUI apps
-            target_arch='x86_64', #'arm64', #'universal2',
+            target_arch=TARGET_ARCH, # 'arm64', 'x86_64', 'universal2'
             codesign_identity=None,
             entitlements_file=None
             )
@@ -180,7 +224,7 @@ with open('Info.plist', 'rb') as infile:
                     'CFBundleVersion': 'Artisan ' + VERSION,
                     'LSMinimumSystemVersion': minimumSystemVersion,
                     'LSMultipleInstancesProhibited': False,
-                    'LSArchitecturePriority': ['x86_64'],
+                    'LSArchitecturePriority': LS_ARCHITECTURE_PRIORITY,
                     'NSHumanReadableCopyright': LICENSE,
                     'NSHighResolutionCapable': True,
 #                    'UIDesignRequiresCompatibility': True, # run in compatibility mode, keeping the existing look and metrics of pre v26 macOS releases

@@ -423,6 +423,8 @@ Section Uninstall
   Delete "$INSTDIR\artisanWheel.ico"
   Delete "$INSTDIR\artisanSettings.ico"
   Delete "$INSTDIR\Humor-Sans.ttf"
+  Delete "$INSTDIR\Roboto-Regular.ttf"
+  Delete "$INSTDIR\Roboto-Bold.ttf"
   Delete "$INSTDIR\dijkstra.ttf"
   Delete "$INSTDIR\xkcd-script.ttf"
   Delete "$INSTDIR\ComicNeue-Regular.ttf"

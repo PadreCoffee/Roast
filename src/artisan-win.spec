@@ -255,6 +255,8 @@ for fn in [
     'artisanSettings.ico',
     'artisanWheel.ico',
     r'includes\Humor-Sans.ttf',
+    r'includes\Roboto-Regular.ttf',
+    r'includes\Roboto-Bold.ttf',
     r'includes\dijkstra.ttf',
     r'includes\ComicNeue-Regular.ttf',
     r'includes\xkcd-script.ttf',

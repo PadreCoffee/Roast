@@ -332,6 +332,31 @@ class EventsDlg(ArtisanResizeablDialog):
         else:
             self.bartypeComboBox.setCurrentIndex(self.aw.qmc.eventsGraphflag+1)
         self.bartypeComboBox.currentIndexChanged.connect(self.eventsGraphTypeflagChanged)
+
+        # Event style: Classic vs Roest markers (moved from Axes dialog)
+        eventstylelabel = QLabel(QApplication.translate('Label','Style'))
+        self.event_style_org = getattr(self.aw.qmc, 'event_style', 'classic')
+        self.eventStyleComboBox = QComboBox()
+        self.eventStyleComboBox.setToolTip(QApplication.translate('Tooltip', 'Event display on roast axis: classic annotations by value, or Roest markers (vertical lines + labels)'))
+        self.eventStyleComboBox.addItem(QApplication.translate('ComboBox', 'Classic'), 'classic')
+        self.eventStyleComboBox.addItem(QApplication.translate('ComboBox', 'Roest markers'), 'roest')
+        idx = self.eventStyleComboBox.findData(self.event_style_org)
+        if idx >= 0:
+            self.eventStyleComboBox.setCurrentIndex(idx)
+        self.eventStyleComboBox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.eventStyleComboBox.currentIndexChanged.connect(self.eventStyleChanged)
+        self.eventstylelabel = eventstylelabel  # store for layout
+
+        # In Roast-like mode: hide classic event styles (bartypeComboBox) and force Roest markers
+        if self.aw.qmc.roast_layout_like:
+            # Hide classic markers combobox and label
+            barstylelabel.setVisible(False)
+            self.bartypeComboBox.setVisible(False)
+            # Force Roest markers event style and disable changing it
+            self.eventStyleComboBox.setCurrentIndex(self.eventStyleComboBox.findData('roest'))
+            self.eventStyleComboBox.setEnabled(False)
+            self.eventStyleComboBox.setToolTip(QApplication.translate('Tooltip', 'Roest markers are required in Roast-like layout mode'))
+            self.aw.qmc.event_style = 'roest'
         typelabel1 = QLabel('1')
         typelabel2 = QLabel('2')
         typelabel3 = QLabel('3')
@@ -1173,6 +1198,9 @@ class EventsDlg(ArtisanResizeablDialog):
         bartypeLayout = QHBoxLayout()
         bartypeLayout.addWidget(barstylelabel)
         bartypeLayout.addWidget(self.bartypeComboBox,Qt.AlignmentFlag.AlignLeft)
+        bartypeLayout.addSpacing(10)
+        bartypeLayout.addWidget(self.eventstylelabel)
+        bartypeLayout.addWidget(self.eventStyleComboBox,Qt.AlignmentFlag.AlignLeft)
         FlagsLayout = QHBoxLayout()
         FlagsLayout.addStretch()
         FlagsLayout.addWidget(self.eventsbuttonflag)
@@ -3312,6 +3340,11 @@ class EventsDlg(ArtisanResizeablDialog):
             self.aw.qmc.eventsshowflag = 1
         self.aw.qmc.redraw(recomputeAllDeltas=False)
 
+    @pyqtSlot(int)
+    def eventStyleChanged(self, _:int) -> None:
+        self.aw.qmc.event_style = self.eventStyleComboBox.currentData() or 'classic'
+        self.aw.qmc.redraw(recomputeAllDeltas=False)
+
     def saveSliderSettings(self) -> None:
         self.aw.eventslidervisibilities[0] = int(self.E1visibility.isChecked())
         self.aw.eventslidervisibilities[1] = int(self.E2visibility.isChecked())
@@ -3428,6 +3461,7 @@ class EventsDlg(ArtisanResizeablDialog):
         self.showeventsonbtstored = self.aw.qmc.showeventsonbt
         self.showEtypesstored = self.aw.qmc.showEtypes[:]
         self.eventsGraphflagstored = self.aw.qmc.eventsGraphflag
+        self.event_style_stored = getattr(self.aw.qmc, 'event_style', 'classic')
         self.etypesstored = self.aw.qmc.etypes
         self.etypeComboBoxstored_currentIndex = self.aw.etypeComboBox.currentIndex()
         self.chargeTimerFlagstored = self.aw.qmc.chargeTimerFlag
@@ -3502,6 +3536,7 @@ class EventsDlg(ArtisanResizeablDialog):
         self.aw.qmc.showeventsonbt = self.showeventsonbtstored
         self.aw.qmc.showEtypes = self.showEtypesstored[:]
         self.aw.qmc.eventsGraphflag = self.eventsGraphflagstored
+        self.aw.qmc.event_style = self.event_style_stored
         self.aw.qmc.etypes = self.etypesstored
         try:
             self.aw.etypeComboBox.setCurrentIndex(self.etypeComboBoxstored_currentIndex)
@@ -3714,6 +3749,7 @@ class EventsDlg(ArtisanResizeablDialog):
         #save window geometry
         settings.setValue('EventsGeometry',self.saveGeometry())
         self.aw.EventsDlg_activeTab = self.TabWidget.currentIndex()
+        self.aw.qmc.ensure_hover_connected()
 
     @pyqtSlot(bool)
     def showEventbuttonhelp(self, _:bool = False) -> None:

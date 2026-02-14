@@ -24,6 +24,8 @@
 
 from typing import Final, TYPE_CHECKING
 
+import os
+
 if TYPE_CHECKING:
     from artisanlib.main import ApplicationWindow # pylint: disable=unused-import
 
@@ -41,18 +43,38 @@ schedule_date_tag: Final[str] = 'scheduleDate' # send as 's_item_date' as part o
 #web_base_url         = 'https://localhost:8088'
 
 # # CLOUD SETUP
-api_base_url: Final[str] = 'https://artisan.plus/api/v1'
+DEFAULT_API_BASE_URL: Final[str] = 'https://artisan.plus/api/v1'
+api_base_url: str = os.getenv('ARTISAN_PLUS_BASE_URL', DEFAULT_API_BASE_URL)
 web_base_url: Final[str] = 'https://artisan.plus'
 
 shop_base_url: Final[str] = 'https://buy.artisan.plus/'
 
 register_url: Final[str] = web_base_url + '/register'
 reset_passwd_url: Final[str] = web_base_url + '/resetPassword'
-auth_url: Final[str] = api_base_url + '/accounts/users/authenticate'
-stock_url: Final[str] = api_base_url + '/acoffees'
-roast_url: Final[str] = api_base_url + '/aroast'
-lock_schedule_url: Final[str] = api_base_url + '/aschedule/lock'
-notifications_url: Final[str] = api_base_url + '/notifications'
+auth_url: str
+stock_url: str
+roast_url: str
+lock_schedule_url: str
+notifications_url: str
+
+def _normalize_api_base_url(base_url: str) -> str:
+    url = base_url.strip()
+    if url.endswith('/'):
+        url = url.rstrip('/')
+    return url
+
+def set_api_base_url(base_url: str|None) -> None:
+    global api_base_url, auth_url, stock_url, roast_url, lock_schedule_url, notifications_url
+    if base_url is None or base_url.strip() == '':
+        base_url = DEFAULT_API_BASE_URL
+    api_base_url = _normalize_api_base_url(base_url)
+    auth_url = api_base_url + '/accounts/users/authenticate'
+    stock_url = api_base_url + '/acoffees'
+    roast_url = api_base_url + '/aroast'
+    lock_schedule_url = api_base_url + '/aschedule/lock'
+    notifications_url = api_base_url + '/notifications'
+
+set_api_base_url(api_base_url)
 
 # Connection configurations
 

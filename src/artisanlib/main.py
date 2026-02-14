@@ -711,8 +711,6 @@ from artisanlib.notifications import Notification, NotificationManager, Notifica
 from artisanlib.canvas import tgraphcanvas
 from artisanlib.phases_canvas import tphasescanvas
 from artisanlib.scale import ScaleManager
-
-
 # import artisan.plus module
 import plus.config
 import plus.util
@@ -1445,7 +1443,7 @@ class ApplicationWindow(QMainWindow):
     updateScheduleSignal = pyqtSignal()
     disconnectPlusSignal = pyqtSignal()
 
-    __slots__ = [ 'locale_str', 'app', 'superusermode', 'sample_loop_running', 'time_stopped', 'plus_account', 'plus_account_id', 'plus_remember_credentials', 'plus_email', 'plus_language', 'plus_subscription', 'percent_decimals',
+    __slots__ = [ 'locale_str', 'app', 'superusermode', 'sample_loop_running', 'time_stopped', 'plus_account', 'plus_account_id', 'plus_remember_credentials', 'plus_email', 'plus_language', 'plus_subscription', 'plus_api_base_url', 'percent_decimals',
         'plus_paidUntil', 'plus_rlimit', 'plus_used', 'plus_readonly', 'plus_user_id', 'appearance', 'mpl_fontproperties', 'full_screen_mode_active', 'processingKeyEvent', 'quickEventShortCut',
         'eventaction_running_threads', 'curFile', 'MaxRecentFiles', 'recentFileActs', 'recentSettingActs',
         'recentThemeActs', 'applicationDirectory', 'helpdialog', 'redrawTimer', 'lastLoadedProfile', 'lastLoadedBackground', 'LargeScaleLCDsFlag', 'largeScaleLCDs_dialog',
@@ -1555,6 +1553,7 @@ class ApplicationWindow(QMainWindow):
         self.plus_rlimit:float = 0 # account amount limit (kg); if 0 then considered as not valid
         self.plus_used:float = 0   # account amount greens roasted within rlimit (kg); if 0 then considered as not valid
         self.plus_readonly:bool = False # True if the plus user has only read rights to the plus account (account might be deactivated, or user might be a read-only user)
+        self.plus_api_base_url:str = plus.config.api_base_url
 
         self.percent_decimals:int = 1 # number of decimals to render percentage values like weight loss (set to 0, 1 or 2)
 
@@ -1562,6 +1561,9 @@ class ApplicationWindow(QMainWindow):
         # on Windows we use the Fusion style per default which supports the dark mode
         if platform.system().startswith('Windows'):
             self.appearance = 'fusion'
+
+        # UI font family (used for both Qt app and matplotlib default)
+        self.ui_font_family:str = ''
 
         # matplotlib font properties:
         self.mpl_fontproperties = FontProperties()
@@ -1850,6 +1852,8 @@ class ApplicationWindow(QMainWindow):
         self.soundflag:int = 0
 
         self.notificationsflag:bool = True # show/hide and enable/disable notifications
+
+        self.debug_render:bool = False # when True, log render_time_ms (avg/max), artists per axes, hover update rate
 
         # recent roasts, an ordered list (first-in, first-out) of dictionaries holding partial roast-properties and a link to the background profile if any
         self.recentRoasts:list[RecentRoast] = []
@@ -3939,7 +3943,8 @@ class ApplicationWindow(QMainWindow):
         self.splitter: Splitter = Splitter(Qt.Orientation.Vertical)
         self.splitter.addWidget(self.qmc.canvas)
         self.splitter.addWidget(self.scroller)
-        self.splitter.setSizes([100,0])
+        # Give canvas most of the vertical space (scroller hidden); [100,0] left canvas only 100px tall and clipped the main chart
+        self.splitter.setSizes([10000, 0])
         self.splitter.setFrameShape(QFrame.Shape.NoFrame)
         #self.splitter.handle(0).setVisible(False)
 
@@ -4561,7 +4566,7 @@ class ApplicationWindow(QMainWindow):
             from artisanlib.phases_canvas import tphasescanvas # pylint: disable=reimported
             self.qpc = tphasescanvas(self.dpi, self)
             self.qpc.canvas.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Fixed)
-            self.qpc.canvas.mpl_connect('scroll_event', self.scrollingPhases)
+            self.phases_scroll_cid = self.qpc.canvas.fig.canvas.mpl_connect('scroll_event', self.scrollingPhases)
             self.scroller.setWidget(self.qpc.canvas)
 
     def scale_connected_handler(self, scale_id:str, scale_name:str) -> None:
@@ -7710,6 +7715,7 @@ class ApplicationWindow(QMainWindow):
             try:
                 rcParams['axes.unicode_minus'] = True
                 rcParams['font.size'] = 12.0
+                # Font family lists (no global UI font prepended - restore pre-Roboto behaviour for stable plot rendering)
                 if platform.system() == 'Darwin':
                     if self.locale_str == 'zh_CN':
                         mpl.rcParams['font.family'] = ['Heiti SC', 'Arial Unicode MS', 'DejaVu Sans', 'sans-serif']
@@ -12230,6 +12236,17 @@ class ApplicationWindow(QMainWindow):
             else:
                 self.qmc.l_subtitle.set_color(self.qmc.palette['title_hidden'])
             self.qmc.ax.draw_artist(self.qmc.l_subtitle)
+            # #region agent log: ROAST_DEBUG blit (main.py)
+            try:
+                from artisanlib.canvas import _ROAST_DEBUG_ENABLED, _cursor_debug_log
+                if _ROAST_DEBUG_ENABLED:
+                    _cursor_debug_log('main_blit_no_arg', {
+                        'bbox_px': 'full_figure', 'axis_corresponds_to': 'fig',
+                        'note': 'canvas.blit() no args = full figure blit'
+                    }, hypothesis_id='blit_diag', location='main.py:blit')
+            except Exception:  # pylint: disable=broad-except
+                pass
+            # #endregion
             self.qmc.ax.figure.canvas.blit()
             self.qmc.ax.figure.canvas.flush_events()
             self.qmc.ax_background = None
@@ -16327,6 +16344,9 @@ class ApplicationWindow(QMainWindow):
                 self.qmc.profile_meter = 'Unknown'
             if _log.isEnabledFor(logging.DEBUG):
                 _log.debug(self.profileQuality(m,True))
+            # Roast-like: ensure first redraw after load uses roast-like axes (no need for Axes→OK)
+            if not quiet and self.qmc.roast_layout_like and data_len > 0:
+                self.qmc.redraw(recomputeAllDeltas=False, forceRenewAxis=True)
             return True
         except Exception as ex: # pylint: disable=broad-except
             _log.exception(ex)
@@ -17978,6 +17998,8 @@ class ApplicationWindow(QMainWindow):
             self.plus_language = settings.value('plus_language',self.plus_language)
             self.plus_user_id = settings.value('plus_user_id',self.plus_user_id)
             self.plus_account_id = settings.value('plus_account_id',self.plus_account_id)
+            self.plus_api_base_url = settings.value('plus_api_base_url', self.plus_api_base_url)
+            plus.config.set_api_base_url(self.plus_api_base_url)
             plus.stock.coffee_label_normal_order = settings.value('standard_bean_labels',plus.stock.coffee_label_normal_order)
             #restore mode
             old_mode = self.qmc.mode
@@ -18259,8 +18281,12 @@ class ApplicationWindow(QMainWindow):
             self.qmc.extra_event_sampling_delay = toInt(settings.value('ExtraEventSamplingDelay',int(self.qmc.extra_event_sampling_delay)))
             #restore colors
             if settings.contains('Colors'):
+                _curve_defaults = {'et': '#1f77b4ff', 'bt': '#d62728ff', 'deltaet': '#000000ff', 'deltabt': '#d9910fff'}
                 for (k, v) in list(settings.value('Colors').items()):
-                    self.qmc.palette[str(k)] = s2a(toString(v))
+                    val = s2a(toString(v))
+                    if str(k) in _curve_defaults and (not val or str(val).strip() == '' or str(val) == 'None'):
+                        val = _curve_defaults[str(k)]
+                    self.qmc.palette[str(k)] = val
                 if 'messages' in self.qmc.palette:
                     self.setLabelColor(self.messagelabel,self.qmc.palette['messages'])
                 if 'et' in self.qmc.palette:
@@ -18754,6 +18780,13 @@ class ApplicationWindow(QMainWindow):
             settings.endGroup()
 #--- END GROUP Style
 
+#--- BEGIN GROUP UI (debug / render / font)
+            settings.beginGroup('UI')
+            self.debug_render = toBool(settings.value('debug_render', getattr(self, 'debug_render', False)))
+            self.ui_font_family = str(settings.value('fontFamily', self.ui_font_family))
+            settings.endGroup()
+#--- END GROUP UI
+
 #--- BEGIN GROUP Sound
             settings.beginGroup('Sound')
             self.soundflag = toInt(settings.value('Beep',self.soundflag))
@@ -18813,6 +18846,25 @@ class ApplicationWindow(QMainWindow):
             self.qmc.legendloc = toInt(settings.value('legendloc',self.qmc.legendloc))
             self.qmc.temp_grid = toBool(settings.value('temp_grid',self.qmc.temp_grid))
             self.qmc.time_grid = toBool(settings.value('time_grid',self.qmc.time_grid))
+            self.qmc.roast_layout_like = toBool(settings.value('roastLayout',self.qmc.roast_layout_like))
+            self.qmc.event_style = toString(settings.value('eventStyle', getattr(self.qmc, 'event_style', 'classic')))
+            if self.qmc.event_style not in ('classic', 'roest'):
+                self.qmc.event_style = 'classic'
+            self.qmc.phases_bar_show_labels = toBool(settings.value('phasesBarShowLabels',self.qmc.phases_bar_show_labels))
+            self.qmc.roast_tooltip_show_bt = toBool(settings.value('roastTooltipShowBt', getattr(self.qmc, 'roast_tooltip_show_bt', True)))
+            self.qmc.roast_tooltip_show_et = toBool(settings.value('roastTooltipShowEt', getattr(self.qmc, 'roast_tooltip_show_et', True)))
+            self.qmc.roast_tooltip_show_ror_et = toBool(settings.value('roastTooltipShowRorEt', getattr(self.qmc, 'roast_tooltip_show_ror_et', True)))
+            self.qmc.roast_tooltip_show_ror_bt = toBool(settings.value('roastTooltipShowRorBt', getattr(self.qmc, 'roast_tooltip_show_ror_bt', True)))
+            for i in range(20):
+                key = f'roastTooltipExtra{i}'
+                if settings.contains(key):
+                    if not hasattr(self.qmc, 'roast_tooltip_show_extra_by_index') or not isinstance(getattr(self.qmc, 'roast_tooltip_show_extra_by_index', None), dict):
+                        self.qmc.roast_tooltip_show_extra_by_index = {}
+                    self.qmc.roast_tooltip_show_extra_by_index[i] = toBool(settings.value(key, True))
+            self.qmc.roast_tooltip_show_e1 = toBool(settings.value('roastTooltipShowE1', getattr(self.qmc, 'roast_tooltip_show_e1', True)))
+            self.qmc.roast_tooltip_show_e2 = toBool(settings.value('roastTooltipShowE2', getattr(self.qmc, 'roast_tooltip_show_e2', True)))
+            self.qmc.roast_tooltip_show_e3 = toBool(settings.value('roastTooltipShowE3', getattr(self.qmc, 'roast_tooltip_show_e3', True)))
+            self.qmc.roast_tooltip_show_e4 = toBool(settings.value('roastTooltipShowE4', getattr(self.qmc, 'roast_tooltip_show_e4', True)))
             settings.endGroup()
 #--- END GROUP Axis
 
@@ -19392,6 +19444,16 @@ class ApplicationWindow(QMainWindow):
                 self.summarystatstypes = [toInt(x) for x in toList(settings.value('summarystatstypes',self.summarystatstypes))]
             if settings.contains('summarystatsfontsize'):
                 self.summarystatsfontsize = toInt(settings.value('summarystatsfontsize', int(self.summarystatsfontsize)))
+            if settings.contains('HoverBubbleConfig'):
+                try:
+                    import json
+                    raw = settings.value('HoverBubbleConfig', None)
+                    if raw and isinstance(raw, str):
+                        cfg = json.loads(raw)
+                        if isinstance(cfg, list) and cfg:
+                            self.qmc.hover_bubble_config = [{'key': str(e.get('key', '')), 'enabled': bool(e.get('enabled', True))} for e in cfg if isinstance(e, dict) and e.get('key')]
+                except Exception:  # pylint: disable=broad-except
+                    pass
             settings.endGroup()
 #--- END GROUP ExtrasMoreInfo
 
@@ -19689,9 +19751,17 @@ class ApplicationWindow(QMainWindow):
 
     @staticmethod
     def getColor(line:Any) -> Any:
-        c = line.get_color()
+        if line is None:
+            return None
+        try:
+            c = line.get_color()
+        except Exception:  # pylint: disable=broad-except
+            return None
         if isinstance(c, (str, tuple)):
-            return mpl.colors.rgb2hex(c, keep_alpha=True) # pyright:ignore[reportAttributeAccessIssue] # tuple items expected to be of type float
+            try:
+                return mpl.colors.rgb2hex(c, keep_alpha=True)  # pyright:ignore[reportAttributeAccessIssue]
+            except Exception:  # pylint: disable=broad-except
+                return None
         return c
 
     def fetchCurveStyles(self) -> None:
@@ -19711,7 +19781,8 @@ class ApplicationWindow(QMainWindow):
                 if isinstance(m, str):
                     self.qmc.ETmarker = m
                 self.qmc.ETmarkersize = max(self.qmc.markersize_min, self.qmc.l_temp1.get_markersize())
-                self.qmc.palette['et'] = self.getColor(self.qmc.l_temp1)
+                _et_color = self.getColor(self.qmc.l_temp1)
+                self.qmc.palette['et'] = _et_color if _et_color else (self.qmc.palette.get('et') or '#1f77b4ff')
             if self.qmc.l_temp2 is not None:
                 ls = self.qmc.l_temp2.get_linestyle()
                 if isinstance(ls, str):
@@ -20039,6 +20110,7 @@ class ApplicationWindow(QMainWindow):
                 self.settingsSetValue(settings, default_settings, 'plus_language', self.plus_language, read_defaults)
                 self.settingsSetValue(settings, default_settings, 'plus_user_id', self.plus_user_id, read_defaults)
                 self.settingsSetValue(settings, default_settings, 'plus_account_id', self.plus_account_id, read_defaults)
+                self.settingsSetValue(settings, default_settings, 'plus_api_base_url', self.plus_api_base_url, read_defaults)
             self.settingsSetValue(settings, default_settings, 'standard_bean_labels', plus.stock.coffee_label_normal_order, read_defaults)
 
             if not read_defaults: # we don't add those to the cache forcing those settings to be saved always
@@ -20595,6 +20667,13 @@ class ApplicationWindow(QMainWindow):
             settings.endGroup()
 #--- END GROUP Style
 
+#--- BEGIN GROUP UI
+            settings.beginGroup('UI')
+            self.settingsSetValue(settings, default_settings, 'debug_render', getattr(self, 'debug_render', False), read_defaults)
+            self.settingsSetValue(settings, default_settings, 'fontFamily', self.ui_font_family, read_defaults)
+            settings.endGroup()
+#--- END GROUP UI
+
 #--- BEGIN GROUP Sound
             settings.beginGroup('Sound')
             self.settingsSetValue(settings, default_settings, 'Beep',self.soundflag, read_defaults)
@@ -20649,6 +20728,20 @@ class ApplicationWindow(QMainWindow):
             self.settingsSetValue(settings, default_settings, 'chargemintime',self.qmc.chargemintime, read_defaults)
             self.settingsSetValue(settings, default_settings, 'temp_grid',self.qmc.temp_grid, read_defaults)
             self.settingsSetValue(settings, default_settings, 'time_grid',self.qmc.time_grid, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'roastLayout',self.qmc.roast_layout_like, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'eventStyle', getattr(self.qmc, 'event_style', 'classic'), read_defaults)
+            self.settingsSetValue(settings, default_settings, 'phasesBarShowLabels',self.qmc.phases_bar_show_labels, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'roastTooltipShowBt', self.qmc.roast_tooltip_show_bt, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'roastTooltipShowEt', self.qmc.roast_tooltip_show_et, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'roastTooltipShowRorEt', self.qmc.roast_tooltip_show_ror_et, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'roastTooltipShowRorBt', self.qmc.roast_tooltip_show_ror_bt, read_defaults)
+            extra_by_index = getattr(self.qmc, 'roast_tooltip_show_extra_by_index', {}) or {}
+            for i in range(20):
+                self.settingsSetValue(settings, default_settings, f'roastTooltipExtra{i}', extra_by_index.get(i, True), read_defaults)
+            self.settingsSetValue(settings, default_settings, 'roastTooltipShowE1', self.qmc.roast_tooltip_show_e1, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'roastTooltipShowE2', self.qmc.roast_tooltip_show_e2, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'roastTooltipShowE3', self.qmc.roast_tooltip_show_e3, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'roastTooltipShowE4', self.qmc.roast_tooltip_show_e4, read_defaults)
             settings.endGroup()
 #--- END GROUP Axis
 
@@ -21053,6 +21146,13 @@ class ApplicationWindow(QMainWindow):
             self.settingsSetValue(settings, default_settings, 'showtimeguide',self.qmc.showtimeguide, read_defaults)
             self.settingsSetValue(settings, default_settings, 'summarystatstypes',self.summarystatstypes, read_defaults)
             self.settingsSetValue(settings, default_settings, 'summarystatsfontsize',self.summarystatsfontsize, read_defaults)
+            try:
+                import json
+                hover_cfg = getattr(self.qmc, 'hover_bubble_config', None)
+                if hover_cfg and isinstance(hover_cfg, list):
+                    self.settingsSetValue(settings, default_settings, 'HoverBubbleConfig', json.dumps(hover_cfg), read_defaults)
+            except Exception:  # pylint: disable=broad-except
+                pass
             settings.endGroup()
 #--- END GROUP ExtrasMoreInfo
 
@@ -21281,6 +21381,16 @@ class ApplicationWindow(QMainWindow):
                     if lastLoadedBackground != '':
                         self.qmc.backgroundpath = lastLoadedBackground
                 self.qmc.flagKeepON = flagKeepON
+                # disconnect all matplotlib event handlers before closing
+                self.qmc.disconnectCanvasHandlers()
+                if self.qpc is not None and hasattr(self.qpc, 'disconnectHandlers'):
+                    self.qpc.disconnectHandlers()
+                if getattr(self, 'phases_scroll_cid', None) is not None and self.qpc is not None:
+                    try:
+                        self.qpc.canvas.fig.canvas.mpl_disconnect(self.phases_scroll_cid)
+                    except Exception: # pylint: disable=broad-except
+                        pass
+                    self.phases_scroll_cid = None
                 if QApplication.queryKeyboardModifiers() != (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier):
                     self.closeEventSettings() # it takes quite some time to write the >1000 setting items
 #                gc.collect() # this takes quite some time

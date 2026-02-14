@@ -83,6 +83,8 @@ cp artisan-athm.xml dist
 cp artisan-aset.xml dist
 cp artisan-wg.xml dist
 cp includes/Humor-Sans.ttf dist
+cp includes/Roboto-Regular.ttf dist
+cp includes/Roboto-Bold.ttf dist
 cp includes/WenQuanYiZenHei-01.ttf dist
 cp includes/WenQuanYiZenHeiMonoMedium.ttf dist
 cp includes/SourceHanSansCN-Regular.otf dist

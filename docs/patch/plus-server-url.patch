@@ -1,0 +1,84 @@
+diff --git a/src/artisanlib/main.py b/src/artisanlib/main.py
+index 55904c03..fe4046f6 100644
+--- a/src/artisanlib/main.py
++++ b/src/artisanlib/main.py
+@@ -1448 +1448 @@ class ApplicationWindow(QMainWindow):
+-    __slots__ = [ 'locale_str', 'app', 'superusermode', 'sample_loop_running', 'time_stopped', 'plus_account', 'plus_account_id', 'plus_remember_credentials', 'plus_email', 'plus_language', 'plus_subscription', 'percent_decimals',
++    __slots__ = [ 'locale_str', 'app', 'superusermode', 'sample_loop_running', 'time_stopped', 'plus_account', 'plus_account_id', 'plus_remember_credentials', 'plus_email', 'plus_language', 'plus_subscription', 'plus_api_base_url', 'percent_decimals',
+@@ -1557,0 +1558 @@ class ApplicationWindow(QMainWindow):
++        self.plus_api_base_url:str = plus.config.api_base_url
+@@ -17980,0 +17982,2 @@ class ApplicationWindow(QMainWindow):
++            self.plus_api_base_url = settings.value('plus_api_base_url', self.plus_api_base_url)
++            plus.config.set_api_base_url(self.plus_api_base_url)
+@@ -20041,0 +20045 @@ class ApplicationWindow(QMainWindow):
++                self.settingsSetValue(settings, default_settings, 'plus_api_base_url', self.plus_api_base_url, read_defaults)
+diff --git a/src/plus/config.py b/src/plus/config.py
+index 84dcb1ab..ed7da867 100644
+--- a/src/plus/config.py
++++ b/src/plus/config.py
+@@ -26,0 +27,2 @@ from typing import Final, TYPE_CHECKING
++import os
++
+@@ -44 +46,2 @@ schedule_date_tag: Final[str] = 'scheduleDate' # send as 's_item_date' as part o
+-api_base_url: Final[str] = 'https://artisan.plus/api/v1'
++DEFAULT_API_BASE_URL: Final[str] = 'https://artisan.plus/api/v1'
++api_base_url: str = os.getenv('ARTISAN_PLUS_BASE_URL', DEFAULT_API_BASE_URL)
+@@ -51,5 +54,24 @@ reset_passwd_url: Final[str] = web_base_url + '/resetPassword'
+-auth_url: Final[str] = api_base_url + '/accounts/users/authenticate'
+-stock_url: Final[str] = api_base_url + '/acoffees'
+-roast_url: Final[str] = api_base_url + '/aroast'
+-lock_schedule_url: Final[str] = api_base_url + '/aschedule/lock'
+-notifications_url: Final[str] = api_base_url + '/notifications'
++auth_url: str
++stock_url: str
++roast_url: str
++lock_schedule_url: str
++notifications_url: str
++
++def _normalize_api_base_url(base_url: str) -> str:
++    url = base_url.strip()
++    if url.endswith('/'):
++        url = url.rstrip('/')
++    return url
++
++def set_api_base_url(base_url: str|None) -> None:
++    global api_base_url, auth_url, stock_url, roast_url, lock_schedule_url, notifications_url
++    if base_url is None or base_url.strip() == '':
++        base_url = DEFAULT_API_BASE_URL
++    api_base_url = _normalize_api_base_url(base_url)
++    auth_url = api_base_url + '/accounts/users/authenticate'
++    stock_url = api_base_url + '/acoffees'
++    roast_url = api_base_url + '/aroast'
++    lock_schedule_url = api_base_url + '/aschedule/lock'
++    notifications_url = api_base_url + '/notifications'
++
++set_api_base_url(api_base_url)
+diff --git a/src/plus/login.py b/src/plus/login.py
+index 4ff67f63..f169fc3d 100644
+--- a/src/plus/login.py
++++ b/src/plus/login.py
+@@ -25 +25 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QGroupBox, QHBoxLayout,
+-    QVBoxLayout, QLabel, QLineEdit, QDialogButtonBox, QWidget)
++    QVBoxLayout, QLabel, QLineEdit, QDialogButtonBox, QWidget, QComboBox)
+@@ -41 +41 @@ class Login(ArtisanDialog):
+-    __slots__ = [ 'login', 'passwd', 'remember', 'linkRegister', 'linkResetPassword', 'textPass', 'textName', 'rememberCheckbox' ]
++    __slots__ = [ 'login', 'passwd', 'remember', 'linkRegister', 'linkResetPassword', 'textPass', 'textName', 'rememberCheckbox', 'serverCombo' ]
+@@ -119,0 +120,9 @@ class Login(ArtisanDialog):
++        self.serverCombo:QComboBox = QComboBox(self)
++        self.serverCombo.setEditable(True)
++        server_urls = []
++        for url in [aw.plus_api_base_url, config.DEFAULT_API_BASE_URL]:
++            if url and url not in server_urls:
++                server_urls.append(url)
++        self.serverCombo.addItems(server_urls)
++        self.serverCombo.setCurrentText(aw.plus_api_base_url)
++
+@@ -126,0 +136,4 @@ class Login(ArtisanDialog):
++        credentialsLayout.addWidget(
++            QLabel(QApplication.translate('Plus', 'Server URL'))
++        )
++        credentialsLayout.addWidget(self.serverCombo)
+@@ -200,0 +214,3 @@ class Login(ArtisanDialog):
++        base_url = self.serverCombo.currentText().strip()
++        config.set_api_base_url(base_url)
++        self.aw.plus_api_base_url = config.api_base_url

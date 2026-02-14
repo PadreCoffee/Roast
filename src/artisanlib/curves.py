@@ -2552,6 +2552,7 @@ class CurvesDlg(ArtisanDialog):
     @override
     def closeEvent(self, a0:'QCloseEvent|None' = None) -> None:
         del a0
+        self.aw.qmc.ensure_hover_connected()
         self.close()
 
     #cancel button

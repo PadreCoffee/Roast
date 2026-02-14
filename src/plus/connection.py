@@ -184,8 +184,9 @@ def authentify() -> bool:
                 '-> authentifying reply status code: %s',
                 r.status_code,
             )  # @UndefinedVariable
+            ct = (r.headers.get('content-type') or '').strip()
             # returns 404: login wrong and 401: passwd wrong
-            if r.status_code != 204 and r.headers['content-type'].strip().startswith('application/json'):
+            if r.status_code != 204 and ct.startswith('application/json'):
                 res = r.json()
                 if (
                     'success' in res
@@ -289,6 +290,19 @@ def authentify() -> bool:
                             '-> account: %s', account_nr
                         )
                     return True
+
+                # Accept alternate authenticate response schema:
+                # HTTP 200 + JSON {"token":"..."} (for dev/local or forks) should be treated as success.
+                token: str | None = None
+                if isinstance(res, dict):
+                    token_val = res.get('token')
+                    if isinstance(token_val, str) and token_val.strip() != '':
+                        token = token_val.strip()
+                if token is not None:
+                    _log.debug('-> authentified, token received (top-level schema)')
+                    setToken(token, None)
+                    return True
+
                 _log.debug('-> authentication failed')
                 if 'error' in res:
                     aw.sendmessage(

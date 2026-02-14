@@ -22,7 +22,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QGroupBox, QHBoxLayout,
-    QVBoxLayout, QLabel, QLineEdit, QDialogButtonBox, QWidget)
+    QVBoxLayout, QLabel, QLineEdit, QDialogButtonBox, QWidget, QComboBox)
 from PyQt6.QtCore import Qt, pyqtSlot
 from PyQt6.QtGui import QKeySequence, QAction
 
@@ -38,7 +38,7 @@ _log: Final[logging.Logger] = logging.getLogger(__name__)
 
 class Login(ArtisanDialog):
 
-    __slots__ = [ 'login', 'passwd', 'remember', 'linkRegister', 'linkResetPassword', 'textPass', 'textName', 'rememberCheckbox' ]
+    __slots__ = [ 'login', 'passwd', 'remember', 'linkRegister', 'linkResetPassword', 'textPass', 'textName', 'rememberCheckbox', 'serverCombo' ]
 
 
     def __init__(
@@ -117,6 +117,15 @@ class Login(ArtisanDialog):
 
         self.textPass.textChanged.connect(self.textChanged)
 
+        self.serverCombo:QComboBox = QComboBox(self)
+        self.serverCombo.setEditable(True)
+        server_urls = []
+        for url in [aw.plus_api_base_url, config.DEFAULT_API_BASE_URL]:
+            if url and url not in server_urls:
+                server_urls.append(url)
+        self.serverCombo.addItems(server_urls)
+        self.serverCombo.setCurrentText(aw.plus_api_base_url)
+
         self.rememberCheckbox = QCheckBox(
             QApplication.translate('Plus', 'Remember')
         )
@@ -124,6 +133,10 @@ class Login(ArtisanDialog):
         self.rememberCheckbox.stateChanged.connect(self.rememberCheckChanged)
 
         credentialsLayout:QVBoxLayout = QVBoxLayout(self)
+        credentialsLayout.addWidget(
+            QLabel(QApplication.translate('Plus', 'Server URL'))
+        )
+        credentialsLayout.addWidget(self.serverCombo)
         credentialsLayout.addWidget(self.textName)
         credentialsLayout.addWidget(self.textPass)
         credentialsLayout.addWidget(self.rememberCheckbox)
@@ -198,6 +211,9 @@ class Login(ArtisanDialog):
     def setCredentials(self) -> None:
         self.login = self.textName.text()
         self.passwd = self.textPass.text()
+        base_url = self.serverCombo.currentText().strip()
+        config.set_api_base_url(base_url)
+        self.aw.plus_api_base_url = config.api_base_url
         self.accept()
 
 
