@@ -1618,6 +1618,7 @@ class tgraphcanvas(QObject):
         self._roast_hover_markers:list[Any] = []  # kept for cleanup; actual markers in _roast_hover_markers_dict
         self._roast_hover_markers_dict:dict[str, Any] = {}  # curve raw_key -> Line2D marker; update via set_data on hover
         self._hover_line_map:dict[str, Any] = {}  # label -> Line2D for BT/ET/RoR/extra and Air/Drum/Burner/Power (bubble text color from line.get_color())
+        self._roast_hover_bubble_text_areas:list[Any] = []  # TextArea children of bubble VPacker; update text/color in place (no set_child)
 
         # Phases bar (ax_phases): persistent 3 rects + 3 texts, update only x/width/text/visible
         self._phases_bar_rects:list[Rectangle]|None = None
@@ -4327,6 +4328,7 @@ class tgraphcanvas(QObject):
             self._roast_hover_anno = None
         if _stale(getattr(self, '_roast_hover_bbox', None)):
             self._roast_hover_bbox = None
+            self._roast_hover_bubble_text_areas = []
         if _stale(self._roast_hover_bg):
             self._roast_hover_bg = None
         for t in list(self._roast_hover_texts or []):
@@ -4493,6 +4495,14 @@ class tgraphcanvas(QObject):
             return 'controls'
         return raw_key
 
+    @staticmethod
+    def _hover_color_to_hex(color:Any) -> str:
+        """Normalize line color to hex string so TextArea never fails (get_color() can return 'C0', tuple, etc.)."""
+        try:
+            return to_hex(to_rgba(color))
+        except Exception:  # pylint: disable=broad-except
+            return '#e8e8e8'
+
     def build_hover_bubble_lines(self, t_sec:float) -> list[tuple[str, str]]:
         """Build ordered list of (text, color) for the hover bubble from config and current data.
         Roast data (time, BT, ET, RoR, extra) first, then controls. Only enabled and ordered by hover_bubble_config.
@@ -4545,9 +4555,10 @@ class tgraphcanvas(QObject):
                     continue
                 try:
                     line_ref = self._hover_line_map.get(lbl, line)
-                    color = line_ref.get_color() if hasattr(line_ref, 'get_color') else self.palette.get('text', '#333')
+                    raw_c = line_ref.get_color() if hasattr(line_ref, 'get_color') else self.palette.get('text', '#333')
+                    color = self._hover_color_to_hex(raw_c)
                 except Exception:  # pylint: disable=broad-except
-                    color = self.palette.get('text', '#333')
+                    color = '#e8e8e8'
                 if is_ror_axis:
                     disp = f"{lbl} {float2float(RoRfromCtoF(y_val) if self.mode == 'F' else y_val, 1)}"
                 else:
@@ -4570,9 +4581,10 @@ class tgraphcanvas(QObject):
                     continue
                 try:
                     line_ref = self._hover_line_map.get(lbl, line)
-                    ec = line_ref.get_color() if hasattr(line_ref, 'get_color') else self.palette.get('text', '#333')
+                    raw_ec = line_ref.get_color() if hasattr(line_ref, 'get_color') else self.palette.get('text', '#333')
+                    ec = self._hover_color_to_hex(raw_ec)
                 except Exception:  # pylint: disable=broad-except
-                    ec = self.palette.get('text', '#333')
+                    ec = '#e8e8e8'
                 pct = max(0, min(100, int(round(float(y_val)))))
                 text = f"{lbl} {pct}%" if lbl else f"{pct}%"
                 line_specs.append((f'control_{ci}', text, ec))
@@ -4729,27 +4741,28 @@ class tgraphcanvas(QObject):
                     'parts_count': len(parts_with_colors),
                 })
 
-        # Single bubble: AnnotationBbox + VPacker at (t_sec, y_cursor). Use fallbacks so we always update
-        # and redraw when blit is not used (roast-like); no early skip when event/inaxes/ydata missing.
+        # Single bubble: one AnnotationBbox on self.ax, VPacker of TextArea per line. No early return for missing controls (show roast-only).
         y_cursor = event.ydata if (event is not None and hasattr(event, 'ydata')) else None
-        active_ax = event.inaxes if (event is not None and hasattr(event, 'inaxes')) else None
-        # Fallback: use main roast axis and mid-y so bubble is always updated and drawn (no early return)
-        if active_ax is None:
-            active_ax = self.ax
-        if active_ax is not None and y_cursor is None:
+        if self.ax is not None and y_cursor is None:
             try:
-                ylim = active_ax.get_ylim()
+                ylim = self.ax.get_ylim()
                 y_cursor = (ylim[0] + ylim[1]) / 2.0
             except Exception:  # pylint: disable=broad-except
                 pass
-        # #region agent log: why bubble block may be skipped
-        _hover_diag_log('bubble_condition_in_update', {
-            'bbox_not_none': self._roast_hover_bbox is not None,
-            'active_ax_not_none': active_ax is not None,
-            'y_cursor': y_cursor,
-            'entered_block': bool(self._roast_hover_bbox is not None and active_ax is not None and y_cursor is not None),
-        }, hypothesis_id='H5', location='canvas.py:_roast_hover_update')
-        # #endregion
+        # ROAST_DEBUG: every hover update to see why bubble might not draw
+        if _ROAST_DEBUG_ENABLED:
+            try:
+                _bub = getattr(self, '_roast_hover_bbox', None)
+                _roast_debug_log_json({
+                    'event': 'hover_update',
+                    'bubble_exists': _bub is not None,
+                    'bubble_axes_id': id(getattr(_bub, 'axes', None)) if _bub else None,
+                    'ax_id': id(self.ax) if self.ax else None,
+                    'bubble_visible': _bub.get_visible() if _bub and hasattr(_bub, 'get_visible') else None,
+                    'bubble_xy': list(getattr(_bub, 'xy', None)) if _bub and getattr(_bub, 'xy', None) is not None else None,
+                })
+            except Exception:  # pylint: disable=broad-except
+                pass
         for t in (self._roast_hover_texts or []):
             try:
                 t.set_visible(False)
@@ -4765,37 +4778,55 @@ class tgraphcanvas(QObject):
                 self._roast_hover_anno.set_visible(False)
             except Exception:  # pylint: disable=broad-except
                 pass
-        # Always update bubble when it exists; fallback active_ax/y_cursor above so we don't skip (blit not used in roast-like)
-        if self._roast_hover_bbox is not None and active_ax is not None and y_cursor is not None:
-            try:
-                if self._roast_hover_bbox.axes is not active_ax:
+        # Bubble always on self.ax; re-attach if detached. Update existing TextArea children (no set_child); colors from curve line.get_color()
+        if self._roast_hover_bbox is not None and self.ax is not None and y_cursor is not None:
+            if getattr(self._roast_hover_bbox, 'axes', None) is not self.ax:
+                try:
                     self._roast_hover_bbox.remove()
-                    active_ax.add_artist(self._roast_hover_bbox)
-                # Colored lines: each string with its line color (from build_hover_bubble_lines)
-                text_areas = [TextArea(t, textprops=dict(color=c, fontsize='small')) for t, c in parts_with_colors]
-                vpack = VPacker(children=text_areas, pad=0, sep=2)
-                self._roast_hover_bbox.set_child(vpack)
+                    self.ax.add_artist(self._roast_hover_bbox)
+                except Exception:  # pylint: disable=broad-except
+                    pass
+            # Update text and color of existing TextArea children (no set_child); colors from parts_with_colors (curve line.get_color via build_hover_bubble_lines)
+            text_areas = getattr(self, '_roast_hover_bubble_text_areas', None) or []
+            if text_areas:
+                try:
+                    for i, (text_str, color) in enumerate(parts_with_colors):
+                        if i >= len(text_areas):
+                            break
+                        ta = text_areas[i]
+                        if hasattr(ta, '_text'):
+                            ta._text.set_text(text_str)
+                            ta._text.set_color(color)
+                        ta.set_visible(True)
+                    for i in range(len(parts_with_colors), len(text_areas)):
+                        text_areas[i].set_visible(False)
+                except Exception as _bubble_err:  # pylint: disable=broad-except
+                    _hover_diag_log('bubble_set_visible_exception', {'error': str(_bubble_err), 'type': type(_bubble_err).__name__}, hypothesis_id='H6', location='canvas.py:_roast_hover_update')
+                    # do not hide bubble; show with old content
+            # Always update position and show bubble
+            try:
                 self._roast_hover_bbox.xy = (t_sec, y_cursor)
-                # box position is fixed offset (15,15) points from xy via constructor boxcoords='offset points'
                 self._roast_hover_bbox.set_visible(True)
-            except Exception as _bubble_err:  # pylint: disable=broad-except
-                _hover_diag_log('bubble_set_visible_exception', {'error': str(_bubble_err), 'type': type(_bubble_err).__name__}, hypothesis_id='H6', location='canvas.py:_roast_hover_update')
-                if self._roast_hover_bbox is not None:
-                    self._roast_hover_bbox.set_visible(False)
+            except Exception as _pos_err:  # pylint: disable=broad-except
+                _hover_diag_log('bubble_set_visible_exception', {'error': str(_pos_err), 'type': type(_pos_err).__name__}, hypothesis_id='H6', location='canvas.py:_roast_hover_update')
+                try:
+                    self._roast_hover_bbox.set_visible(True)
+                except Exception:  # pylint: disable=broad-except
+                    pass
         elif self._roast_hover_bbox is not None:
             try:
                 self._roast_hover_bbox.set_visible(False)
             except Exception:  # pylint: disable=broad-except
                 pass
-        # Roast-like uses no blit; onmove always calls canvas.draw_idle() so bubble is painted
         if _ROAST_DEBUG_ENABLED:
             try:
-                bbox_vis = self._roast_hover_bbox.get_visible() if self._roast_hover_bbox is not None and hasattr(self._roast_hover_bbox, 'get_visible') else None
-                vline_vis = self._roast_hover_line.get_visible() if self._roast_hover_line is not None and hasattr(self._roast_hover_line, 'get_visible') else None
-                bbox_xy = getattr(self._roast_hover_bbox, 'xy', None) if self._roast_hover_bbox else None
+                _bub = getattr(self, '_roast_hover_bbox', None)
                 _roast_debug_log_json({
                     'event': 'hover_visible_after_update',
-                    'bbox_visible': bbox_vis, 'vline_visible': vline_vis, 'bbox_xy': list(bbox_xy) if bbox_xy is not None else None,
+                    'bubble_exists': _bub is not None,
+                    'bubble_axes_id': id(getattr(_bub, 'axes', None)) if _bub else None,
+                    'bubble_visible': _bub.get_visible() if _bub and hasattr(_bub, 'get_visible') else None,
+                    'bubble_xy': list(getattr(_bub, 'xy', None)) if _bub and getattr(_bub, 'xy', None) is not None else None,
                 })
             except Exception:  # pylint: disable=broad-except
                 pass
@@ -4943,9 +4974,13 @@ class tgraphcanvas(QObject):
                 except Exception:  # pylint: disable=broad-except
                     pass
                 self._roast_hover_bbox = None
+                self._roast_hover_bubble_text_areas = []
         if self._roast_hover_bbox is None:
-            _placeholder = VPacker(children=[TextArea('', textprops=dict(fontsize='small', color='#e8e8e8'))], pad=0, sep=2)
-            self._roast_hover_bbox = AnnotationBbox(_placeholder, (0, 0), xycoords='data',
+            self._roast_hover_bubble_text_areas = [
+                TextArea('', textprops=dict(fontsize='small', color='#e8e8e8')) for _ in range(30)
+            ]
+            _vpack = VPacker(children=self._roast_hover_bubble_text_areas, pad=0, sep=2)
+            self._roast_hover_bbox = AnnotationBbox(_vpack, (0, 0), xycoords='data',
                                                    xybox=(15, 15), boxcoords='offset points',
                                                    frameon=True,
                                                    bboxprops=dict(boxstyle='round,pad=0.35', facecolor='#2d2d2d', alpha=0.95, edgecolor='#555'),
@@ -5107,23 +5142,57 @@ class tgraphcanvas(QObject):
         if isinstance(event, MouseEvent):
             if all(x is None for x in [self.foreground_event_ind, self.foreground_event_pos, self.foreground_event_pick_position,
                 self.background_event_ind, self.background_event_pos, self.background_event_pick_position]):
-                # No drag: show unified crosshair on ax + ax_events + ax_controls + ax_phases when mouse over any of them
+                # No drag: show unified crosshair when mouse over roast axes (ax/delta_ax) or controls (ax_controls)
                 if self.roast_layout_like and self.ax is not None:
-                    in_roast_axes = (event.inaxes in (self.ax, self.ax_events, self.ax_controls, self.ax_phases)
-                                    if event.inaxes is not None else False)
+                    # Gate: roast axes = self.ax, delta_ax; controls = self.ax_controls. If event.inaxes is None, resolve via bbox.contains(event)
+                    in_roast_axes: bool
+                    if event.inaxes is not None:
+                        in_roast_axes = event.inaxes in (self.ax, self.delta_ax, self.ax_controls, self.ax_events, self.ax_phases)
+                    else:
+                        in_roast_axes = False
+                        for _ax in (self.ax, self.delta_ax, self.ax_controls, self.ax_events, self.ax_phases):
+                            if _ax is None:
+                                continue
+                            try:
+                                if _ax.contains(event)[0]:
+                                    in_roast_axes = True
+                                    break
+                            except Exception:  # pylint: disable=broad-except
+                                continue
                     if not in_roast_axes:
+                        if _ROAST_DEBUG_ENABLED:
+                            _roast_debug_log_json({
+                                'event': 'onmove_early_return',
+                                'reason': 'not_in_roast_axes',
+                                'inaxes_id': id(event.inaxes) if event.inaxes is not None else None,
+                            })
                         self._roast_hover_hide()
                         self.fig.canvas.draw_idle()
                         return
-                    # Invalidate stale artists (e.g. after cla/clf from redraw); then ensure hover artists exist
-                    self._roast_hover_invalidate_stale()
-                    if self._roast_hover_line is None:
-                        self._ensure_roest_hover_initialized()
+                    # Resolve t_sec: use xdata when available, else invert (event.x, event.y) via ax that contains
                     t_sec = event.xdata
+                    if t_sec is None or t_sec in (float('-inf'), float('inf')):
+                        for _ax in (self.ax, self.delta_ax, self.ax_controls):
+                            if _ax is None:
+                                continue
+                            try:
+                                if _ax.contains(event)[0]:
+                                    _xy = _ax.transData.inverted().transform((event.x, event.y))
+                                    if len(_xy) >= 1 and _xy[0] not in (float('-inf'), float('inf')):
+                                        t_sec = float(_xy[0])
+                                        break
+                            except Exception:  # pylint: disable=broad-except
+                                continue
                     if t_sec is None or t_sec in (float('-inf'), float('inf')):
                         self._roast_hover_hide()
                         self.fig.canvas.draw_idle()
                         return
+                    if _ROAST_DEBUG_ENABLED:
+                        _roast_debug_log_json({'event': 'onmove_pass', 't_sec': t_sec, 'inaxes_id': id(event.inaxes) if event.inaxes else None})
+                    # Invalidate stale artists (e.g. after cla/clf from redraw); then ensure hover artists exist
+                    self._roast_hover_invalidate_stale()
+                    if self._roast_hover_line is None:
+                        self._ensure_roest_hover_initialized()
                     # Limit cursor to actual curve/event range (no sliding past start/end of data)
                     bounds = self._roast_hover_time_bounds()
                     if bounds is not None:
