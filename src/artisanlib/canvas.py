@@ -35,6 +35,7 @@ import math
 import warnings
 import datetime
 import json
+import uuid
 import numpy
 import logging
 import re
@@ -164,9 +165,13 @@ type Interp1dKind = Literal['linear', 'nearest', 'nearest-up', 'zero', 'slinear'
 
 # Global debug state - can be enabled via ROAST_DEBUG=1 environment variable
 _ROAST_DEBUG_ENABLED: bool = os.environ.get('ROAST_DEBUG', '').strip() in ('1', 'true', 'yes')
+# One run_id per process (session); generated at import so each run is separable from previous
+_ROAST_RUN_ID: str = datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:8]
 _DEBUG_SYSTEM_LOG_PATH: str | None = None  # ~/Library/Logs/Roast/debugging.log (append)
-_DEBUG_REPO_LOG_PATH: str | None = None    # ./debugging.log in repo root (truncate per session)
+_DEBUG_REPO_LOG_PATH: str | None = None    # ./debugging.log in repo root (append in real time when ROAST_DEBUG=1)
 _DEBUG_LOG_INITIALIZED: bool = False
+# .cursor/debug.log: True = truncate at session start and write SESSION_START; False = write to .cursor/debug_<run_id>.log
+_CURSOR_DEBUG_LOG_MODE_A: bool = True
 
 def _get_debug_log_paths() -> tuple[str, str]:
     """Get debug log paths: (system_log, repo_log). Creates directories as needed.
@@ -221,6 +226,56 @@ def _get_roast_debug_dir() -> str:
         return os.path.expanduser('~/Library/Logs/Roast')
     return os.path.join(os.path.expanduser('~'), '.roast', 'logs')
 
+def _roast_debug_ts_ms() -> int:
+    """Unix timestamp in milliseconds for debug JSON (unified ts field)."""
+    return int(datetime.datetime.now().timestamp() * 1000)
+
+def _roast_debug_artifact_path(name_prefix: str, ext: str) -> str:
+    """Path for run-scoped debug artifact, e.g. hover_state_<run_id>.json, roast_like_render_<run_id>.png."""
+    return os.path.join(_get_roast_debug_dir(), f'{name_prefix}_{_ROAST_RUN_ID}{ext}')
+
+# Cursor debug log path: fixed for Mode A, per-run file for Mode B
+_CURSOR_DEBUG_LOG_DIR: str = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '.cursor'))
+
+def _get_cursor_debug_log_path() -> str:
+    """Path to .cursor/debug.log (Mode A) or .cursor/debug_<run_id>.log (Mode B)."""
+    if _CURSOR_DEBUG_LOG_MODE_A:
+        return os.path.join(_CURSOR_DEBUG_LOG_DIR, 'debug.log')
+    return os.path.join(_CURSOR_DEBUG_LOG_DIR, f'debug_{_ROAST_RUN_ID}.log')
+
+def _write_session_start() -> None:
+    """Write SESSION_START marker to cursor debug log (truncate in Mode A, append in Mode B) with run_id and paths."""
+    try:
+        system_path, repo_path = _get_debug_log_paths()
+        debug_dir = _get_roast_debug_dir()
+        cursor_path = _get_cursor_debug_log_path()
+        paths = {
+            'system_debugging_log': system_path,
+            'repo_debugging_log': repo_path,
+            'cursor_debug_log': cursor_path,
+            'debug_dir': debug_dir,
+            'hover_state_json': _roast_debug_artifact_path('hover_state', '.json'),
+            'roest_hover_snapshot_png': _roast_debug_artifact_path('roest_hover_snapshot', '.png'),
+            'roast_like_render_png': _roast_debug_artifact_path('roast_like_render', '.png'),
+        }
+        payload = {
+            'event': 'SESSION_START',
+            'run_id': _ROAST_RUN_ID,
+            'ts': _roast_debug_ts_ms(),
+            'pid': os.getpid(),
+            'paths': paths,
+        }
+        line = json.dumps(payload, default=str) + '\n'
+        os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
+        if _CURSOR_DEBUG_LOG_MODE_A:
+            with open(cursor_path, 'w', encoding='utf-8') as f:
+                f.write(line)
+        else:
+            with open(cursor_path, 'a', encoding='utf-8') as f:
+                f.write(line)
+    except Exception:  # pylint: disable=broad-except
+        pass
+
 def _write_debug_header() -> None:
     """Write header to debug logs (called once per session). Truncates repo log, appends to system log."""
     global _DEBUG_LOG_INITIALIZED  # noqa: PLW0603
@@ -261,25 +316,37 @@ def _write_debug_header() -> None:
         print(f'[ROAST_DEBUG] Failed to write debug log header: {e}')
 
 def write_debug_artifact(text: str) -> None:
-    """Append text to system debug log only. Repo copy is written at exit."""
+    """Append text to system debug log; when ROAST_DEBUG=1 also append to repo log in real time."""
     if not _ROAST_DEBUG_ENABLED:
         return
-    system_path, _ = _get_debug_log_paths()
+    system_path, repo_path = _get_debug_log_paths()
     line = text if text.endswith('\n') else text + '\n'
     try:
         with open(system_path, 'a', encoding='utf-8') as f:
             f.write(line)
+        if repo_path != system_path:
+            with open(repo_path, 'a', encoding='utf-8') as f:
+                f.write(line)
     except Exception:  # pylint: disable=broad-except
         pass
 
 def _roast_debug_log_json(data: dict[str, Any]) -> None:
-    """Append one NDJSON line to system debug log (ROAST_DEBUG=1 only)."""
+    """Append one NDJSON line to system and repo debug logs (ROAST_DEBUG=1). Enriches with run_id, ts (unix_ms), pid."""
     if not _ROAST_DEBUG_ENABLED:
         return
-    system_path, _ = _get_debug_log_paths()
+    payload = dict(data)
+    payload['run_id'] = _ROAST_RUN_ID
+    payload['ts'] = _roast_debug_ts_ms()
+    if 'pid' not in payload:
+        payload['pid'] = os.getpid()
+    system_path, repo_path = _get_debug_log_paths()
+    line = json.dumps(payload, default=str) + '\n'
     try:
         with open(system_path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(data, default=str) + '\n')
+            f.write(line)
+        if repo_path != system_path:
+            with open(repo_path, 'a', encoding='utf-8') as f:
+                f.write(line)
     except Exception:  # pylint: disable=broad-except
         pass
 
@@ -295,22 +362,26 @@ def _roast_debug_copy_to_repo() -> None:
         pass
 
 def debug_checkpoint(tag: str, data: dict[str, Any]) -> None:
-    """Log a debug checkpoint with tag and data dict (one JSON line to system log)."""
+    """Log a debug checkpoint with tag and data dict (one JSON line to system/repo log; run_id/ts/pid added in _roast_debug_log_json)."""
     if not _ROAST_DEBUG_ENABLED:
         return
-    payload = {'event': tag, 'ts': datetime.datetime.now().isoformat(), **data}
+    payload = {'event': tag, **data}
     _roast_debug_log_json(payload)
 
-# Cursor debug log (NDJSON) for runtime hypothesis testing
-_CURSOR_DEBUG_LOG_PATH: str = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '.cursor', 'debug.log'))
-
 def _hover_diag_log(message: str, data: dict[str, Any], hypothesis_id: str = '', location: str = '') -> None:
-    """Append one NDJSON line to .cursor/debug.log for hover diagnostics (always, no ROAST_DEBUG check)."""
+    """Append one NDJSON line to .cursor/debug.log for hover diagnostics (always, no ROAST_DEBUG check). Includes run_id, ts, pid."""
     try:
-        payload = {'timestamp': int(datetime.datetime.now().timestamp() * 1000), 'message': message, 'data': data, 'location': location or 'canvas.py'}
+        payload = {
+            'run_id': _ROAST_RUN_ID,
+            'ts': _roast_debug_ts_ms(),
+            'pid': os.getpid(),
+            'message': message,
+            'data': data,
+            'location': location or 'canvas.py',
+        }
         if hypothesis_id:
             payload['hypothesisId'] = hypothesis_id
-        with open(_CURSOR_DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+        with open(_get_cursor_debug_log_path(), 'a', encoding='utf-8') as f:
             f.write(json.dumps(payload, default=str) + '\n')
     except Exception:  # pylint: disable=broad-except
         pass
@@ -334,14 +405,21 @@ def _hover_diag_artist(name: str, artist: Any) -> dict[str, Any]:
         return {'artist': name, 'is_none': False, 'error': str(e)}
 
 def _cursor_debug_log(message: str, data: dict[str, Any], hypothesis_id: str = '', location: str = '') -> None:
-    """Append one NDJSON line to .cursor/debug.log only when ROAST_DEBUG=1."""
+    """Append one NDJSON line to .cursor/debug.log only when ROAST_DEBUG=1. Includes run_id, ts, pid."""
     if os.environ.get('ROAST_DEBUG') != '1':
         return
     try:
-        payload = {'timestamp': int(datetime.datetime.now().timestamp() * 1000), 'message': message, 'data': data, 'location': location or 'canvas.py'}
+        payload = {
+            'run_id': _ROAST_RUN_ID,
+            'ts': _roast_debug_ts_ms(),
+            'pid': os.getpid(),
+            'message': message,
+            'data': data,
+            'location': location or 'canvas.py',
+        }
         if hypothesis_id:
             payload['hypothesisId'] = hypothesis_id
-        with open(_CURSOR_DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+        with open(_get_cursor_debug_log_path(), 'a', encoding='utf-8') as f:
             f.write(json.dumps(payload, default=str) + '\n')
     except Exception:  # pylint: disable=broad-except
         pass
@@ -356,7 +434,8 @@ def _roast_debug_bbox_px(bbox: Any) -> list[float]:
     except Exception:  # pylint: disable=broad-except
         return []
 
-# Initialize debug log on import if enabled; copy system log to repo root at exit
+# Initialize debug log on import: SESSION_START in cursor log every run; when ROAST_DEBUG=1 also header + atexit copy
+_write_session_start()
 if _ROAST_DEBUG_ENABLED:
     _write_debug_header()
     atexit.register(_roast_debug_copy_to_repo)
@@ -1613,12 +1692,21 @@ class tgraphcanvas(QObject):
         self._roast_hover_last_update:float = 0.0
         self._roast_hover_debug_count:int = 0  # for ROAST_DEBUG: log every ~50 hover events
         self._roast_debug_motion_logged:bool = False  # ROAST_DEBUG: log motion_notify_event callbacks once
+        self._roast_run_id: str = _ROAST_RUN_ID  # session id for this run (same as module-level _ROAST_RUN_ID)
         self._roast_hover_texts:list[Any] = []  # Text artists for colored tooltip lines (legacy fixed HUD)
         self._roast_hover_bg:Any = None  # Rectangle patch for tooltip background (legacy)
         self._roast_hover_markers:list[Any] = []  # kept for cleanup; actual markers in _roast_hover_markers_dict
         self._roast_hover_markers_dict:dict[str, Any] = {}  # curve raw_key -> Line2D marker; update via set_data on hover
         self._hover_line_map:dict[str, Any] = {}  # label -> Line2D for BT/ET/RoR/extra and Air/Drum/Burner/Power (bubble text color from line.get_color())
         self._roast_hover_bubble_text_areas:list[Any] = []  # TextArea children of bubble VPacker; update text/color in place (no set_child)
+        # Roast-like background: separate containers so we can remove/redraw without touching active lines. Not used in hover (labels start with '_').
+        self._bg_roast_lines:list[Any] = []   # Line2D on ax (BT/ET/extra background)
+        self._bg_controls_lines:list[Any] = []  # Line2D on ax_controls (E1-E4 step background)
+        self._bg_delta_lines:list[Any] = []   # Line2D on delta_ax (delta ET/BT background)
+        # BG line color by key for bubble BG_ rows (BT, ET, Air, Drum, Burner, Power, DeltaET, DeltaBT, extra)
+        self._bg_color_map:dict[str, Any] = {}
+        # BG hover: (x, y) arrays actually plotted for roast_bt/et/ror/extra; filled at draw, cleared with bg line lists
+        self._bg_hover_cache:dict[str, tuple[Sequence[float], Sequence[float]]] = {}
 
         # Phases bar (ax_phases): persistent 3 rects + 3 texts, update only x/width/text/visible
         self._phases_bar_rects:list[Rectangle]|None = None
@@ -2980,6 +3068,25 @@ class tgraphcanvas(QObject):
 
     @pyqtSlot(str, bool)
     def showCurve(self, name: str, state: bool) -> None:
+        # #region agent log
+        try:
+            _roast_debug_log_json({
+                'event': 'showCurve_called',
+                'name': name,
+                'state': state,
+                'backgroundETcurve': getattr(self, 'backgroundETcurve', None),
+                'backgroundBTcurve': getattr(self, 'backgroundBTcurve', None),
+                'DeltaETBflag': getattr(self, 'DeltaETBflag', None),
+                'DeltaBTBflag': getattr(self, 'DeltaBTBflag', None),
+            })
+        except Exception:  # pylint: disable=broad-except
+            pass
+        # #endregion
+        # Aliases so menu checkboxes (e.g. BG_ET, BG_BTror) map to canvas flags
+        if name in ('BG_ET', 'BG_BackgroundET', 'BackgroundETcurve'):
+            name = 'BackgroundET'
+        elif name in ('BG_BT', 'BG_BackgroundBT', 'BackgroundBTcurve'):
+            name = 'BackgroundBT'
         changed:bool = False
         if name == 'ET' and self.ETcurve != state:
             self.ETcurve = state
@@ -2998,6 +3105,12 @@ class tgraphcanvas(QObject):
             changed = True
         elif name == 'BackgroundBT' and self.backgroundBTcurve != state:
             self.backgroundBTcurve = state
+            changed = True
+        elif name in ('BG_ETror', 'BG_ETRoR', 'BackgroundDeltaET', 'DeltaETB', 'DeltaET_BG') and self.DeltaETBflag != state:
+            self.DeltaETBflag = state
+            changed = True
+        elif name in ('BG_BTror', 'BG_BTRoR', 'BackgroundDeltaBT', 'DeltaBTB', 'DeltaBT_BG') and self.DeltaBTBflag != state:
+            self.DeltaBTBflag = state
             changed = True
         if changed:
             self.redraw(recomputeAllDeltas=False,re_smooth_foreground=False)
@@ -4282,7 +4395,7 @@ class tgraphcanvas(QObject):
     #     of classic place_annotations().
     #   - E1-E4 control event annotations are suppressed (step lines only).
     #   - Phase watermarks and statistics bars on main ax are skipped.
-    #   - X-axis time labels appear only on ax_phases (bottom strip).
+    #   - X-axis time labels appear under roast (ax) only; ax_controls and ax_phases have no x labels.
     #
     # Use is_roest_mode() to check if Roest markers should be used.
     # Use is_split_layout() to check if the split axes layout is active.
@@ -4305,7 +4418,7 @@ class tgraphcanvas(QObject):
         - ax: main temperature/RoR curves
         - ax_events: thin band for event labels
         - ax_controls: E1-E4 step lines (0-100%)
-        - ax_phases: phase bar with time labels
+        - ax_phases: phase bar (no x-axis labels)
         """
         return self.roast_layout_like
 
@@ -4486,7 +4599,9 @@ class tgraphcanvas(QObject):
 
     @staticmethod
     def _hover_bubble_raw_key_to_config_key(raw_key:str) -> str:
-        """Map raw key to config key for filtering/ordering."""
+        """Map raw key to config key for filtering/ordering. BG keys (roast_bt_bg etc.) map to same as active."""
+        if raw_key.endswith('_bg'):
+            return tgraphcanvas._hover_bubble_raw_key_to_config_key(raw_key[:-3])
         if raw_key in ('roast_ror_et', 'roast_ror_bt'):
             return 'roast_ror'
         if raw_key.startswith('extra_'):
@@ -4503,10 +4618,455 @@ class tgraphcanvas(QObject):
         except Exception:  # pylint: disable=broad-except
             return '#e8e8e8'
 
+    @staticmethod
+    def bg_interp_linear(timeB:list[float]|Any, seriesB:list[float]|Any, x:float) -> float|None:
+        """Linear interpolation of background series at x. Returns None if out of range or NaN/None.
+        Safe for list, numpy.ndarray, numpy.ma.MaskedArray (no truthiness checks on arrays)."""
+        try:
+            if timeB is None or seriesB is None:
+                return None
+            tarr = numpy.asarray(timeB, dtype=float).ravel()
+            yarr = numpy.asarray(seriesB, dtype=float).ravel()
+            if hasattr(yarr, 'filled'):
+                yarr = yarr.filled(numpy.nan)
+            if tarr.size < 2 or yarr.size != tarr.size:
+                return None
+            t0, t1 = float(tarr.flat[0]), float(tarr.flat[-1])
+            if x < t0 or x > t1:
+                return None
+            val = float(numpy.interp(x, tarr, yarr))
+            if val is None or math.isnan(val):
+                return None
+            return val
+        except Exception:  # pylint: disable=broad-except
+            return None
+
+    @staticmethod
+    def bg_step_value(timeB:list[float]|Any, seriesB:list[float]|Any, x:float) -> float|None:
+        """Step value at x: last value with time <= x. Returns None if empty or NaN.
+        Safe for list, numpy.ndarray, numpy.ma.MaskedArray (no truthiness checks on arrays)."""
+        try:
+            if timeB is None or seriesB is None:
+                return None
+            tarr = numpy.asarray(timeB, dtype=float).ravel()
+            varr = numpy.asarray(seriesB, dtype=float).ravel()
+            if hasattr(varr, 'filled'):
+                varr = varr.filled(numpy.nan)
+            if tarr.size == 0 or tarr.size != varr.size:
+                return None
+            n = tarr.size
+            tlist = tarr.tolist()
+            i = bisect.bisect_right(tlist, x) - 1
+            if i < 0:
+                v = varr.flat[0]
+            elif i >= n:
+                v = varr.flat[-1]
+            else:
+                v = varr.flat[i]
+            val = float(v)
+            if math.isnan(val):
+                return None
+            return val
+        except Exception:  # pylint: disable=broad-except
+            return None
+
+    def extra_channel_visible(self, idx: int) -> bool:
+        """True if the extra channel selected by dropdown index (xtcurveidx/ytcurveidx) is visible.
+        idx % 2 == 1 => T1 => extraCurveVisibility1[n], else T2 => extraCurveVisibility2[n]. n = (idx - 1) // 2."""
+        if idx <= 0 or self.aw is None:
+            return False
+        n = (idx - 1) // 2
+        if n >= len(self.aw.extraCurveVisibility1) or n >= len(self.aw.extraCurveVisibility2):
+            return False
+        if idx % 2 == 1:
+            return bool(self.aw.extraCurveVisibility1[n])
+        return bool(self.aw.extraCurveVisibility2[n])
+
+    def bg_enabled_for_raw_key(self, raw_key: str) -> bool:
+        """True if background UI flags allow showing BG for this raw_key (same logic as background drawing)."""
+        if raw_key == 'roast_et':
+            return bool(self.backgroundETcurve)
+        if raw_key == 'roast_bt':
+            return bool(self.backgroundBTcurve)
+        if raw_key == 'roast_ror_et':
+            return bool(self.DeltaETBflag)
+        if raw_key == 'roast_ror_bt':
+            return bool(self.DeltaBTBflag)
+        if raw_key == 'extra_0':
+            return bool(self.xtcurveidx > 0 and self.extra_channel_visible(self.xtcurveidx))
+        if raw_key == 'extra_1':
+            return bool(self.ytcurveidx > 0 and self.extra_channel_visible(self.ytcurveidx))
+        if raw_key.startswith('control_'):
+            try:
+                ci = int(raw_key.split('_')[1])
+            except (IndexError, ValueError):  # pylint: disable=broad-except
+                return False
+            if 0 <= ci <= 3 and ci < len(self.showEtypes):
+                return bool(self.showEtypes[ci])
+            return False
+        return False
+
+    def _pick_bg_series(self, time_arr: list[float] | Any, stemp: Any, temp: list[float] | Any) -> Any:
+        """Pick series for BG interpolation: stemp if length matches time_arr, else temp as array, else None (matches draw fallback)."""
+        try:
+            if time_arr is None:
+                return None
+            n = len(time_arr)
+        except Exception:  # pylint: disable=broad-except
+            return None
+        if n == 0:
+            return None
+        if stemp is not None and hasattr(stemp, '__len__') and len(stemp) == n:
+            return stemp
+        if temp is not None and len(temp) == n:
+            return numpy.asarray(temp, dtype=numpy.double)
+        return None
+
+    def _log_bg_value_at_none(self, raw_key: str, t_sec: float, reason: str, **kw: Any) -> None:
+        """ROAST_DEBUG: log why _bg_value_at returned None for roast/extra keys."""
+        if not _ROAST_DEBUG_ENABLED or raw_key.startswith('control_'):
+            return
+        payload = {
+            'event': '_bg_value_at_none',
+            'raw_key': raw_key,
+            't_sec': t_sec,
+            'reason': reason,
+            'len_timeB': len(self.timeB) if self.timeB else 0,
+            'timeB_range': [self.timeB[0], self.timeB[-1]] if self.timeB and len(self.timeB) >= 2 else None,
+        }
+        if hasattr(self, '_bg_hover_cache') and self._bg_hover_cache is not None:
+            payload['cache_has_key'] = raw_key in self._bg_hover_cache
+            if raw_key in self._bg_hover_cache:
+                tx, arr = self._bg_hover_cache[raw_key]
+                payload['cache_len_x'] = len(tx) if hasattr(tx, '__len__') else None
+                payload['cache_len_y'] = len(arr) if hasattr(arr, '__len__') else None
+                payload['cache_x_range'] = [float(tx[0]), float(tx[-1])] if tx is not None and len(tx) >= 2 else None
+        payload.update(kw)
+        _roast_debug_log_json(payload)
+
+    def _bg_value_at(self, raw_key:str, t_sec:float) -> tuple[str, str] | None:
+        """Return (display_suffix, color_hex) for background at t_sec for the given raw_key, or None if out of range/invalid.
+        raw_key: roast_bt, roast_et, roast_ror_et, roast_ror_bt, extra_0, extra_1, control_0..3 (aliases BT->roast_bt, ET->roast_et accepted)."""
+        if self.timeB is None:
+            return None
+        try:
+            if len(self.timeB) == 0:
+                return None
+        except Exception:  # pylint: disable=broad-except
+            return None
+        # Aliases so callers using legacy names still get a value
+        if raw_key == 'BT':
+            raw_key = 'roast_bt'
+        elif raw_key == 'ET':
+            raw_key = 'roast_et'
+        try:
+            if raw_key == 'roast_bt':
+                if not self.backgroundBTcurve:
+                    self._log_bg_value_at_none(raw_key, t_sec, 'backgroundBTcurve disabled')
+                    return None
+                if raw_key in self._bg_hover_cache:
+                    tx, arr = self._bg_hover_cache[raw_key]
+                    t = max(tx[0], min(tx[-1], t_sec)) if len(tx) > 0 else t_sec
+                    y = self.bg_interp_linear(tx, arr, t)
+                    if y is not None and y > -1e6:
+                        suffix = f"BT {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                        return (suffix, self._bg_color_map.get('BT', '#888888'))
+                    self._log_bg_value_at_none(raw_key, t_sec, 'cache used but y None or < -1e6', source='cache', y_is_none=(y is None))
+                    return None
+                series_bt = None
+                for ln in getattr(self, '_bg_roast_lines', []):
+                    if getattr(ln, 'get_label', None) and (ln.get_label() or '').strip() == '_bg_BT':
+                        xd, yd = ln.get_xdata(), ln.get_ydata()
+                        if xd is not None and yd is not None and len(xd) >= 2 and len(xd) == len(yd):
+                            series_bt = numpy.asarray(yd, dtype=numpy.double).ravel()
+                            tx_bt = numpy.asarray(xd, dtype=float).ravel()
+                            y = self.bg_interp_linear(tx_bt, series_bt, t_sec)
+                            if y is not None and y > -1e6:
+                                suffix = f"BT {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                                return (suffix, self._bg_color_map.get('BT', '#888888'))
+                        break
+                if series_bt is None:
+                    series_bt = self._pick_bg_series(self.timeB, self.stemp2B, self.temp2B)
+                if series_bt is None and getattr(self, 'l_back2', None) is not None and self.l_back2.get_visible():
+                    xd, yd = self.l_back2.get_xdata(), self.l_back2.get_ydata()
+                    if xd is not None and yd is not None:
+                        tx_list = list(numpy.asarray(xd).ravel())
+                        series_bt = list(numpy.asarray(yd).ravel())
+                        if len(tx_list) == len(series_bt) and len(tx_list) >= 2:
+                            series_bt = numpy.asarray(series_bt, dtype=numpy.double)
+                            y = self.bg_interp_linear(tx_list, series_bt, t_sec)
+                            if y is not None and y > -1e6:
+                                suffix = f"BT {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                                return (suffix, self._bg_color_map.get('BT', '#888888'))
+                if series_bt is None:
+                    src = 'stemp' if (self.stemp2B is not None and hasattr(self.stemp2B, '__len__') and len(self.stemp2B) == len(self.timeB)) else 'temp'
+                    self._log_bg_value_at_none(raw_key, t_sec, '_pick_bg_series returned None', source=src, len_stemp=len(self.stemp2B) if hasattr(self.stemp2B, '__len__') else None, len_temp=len(self.temp2B) if self.temp2B is not None else None)
+                    return None
+                y = self.bg_interp_linear(self.timeB, series_bt, t_sec)
+                if y is None or y < -1e6:
+                    self._log_bg_value_at_none(raw_key, t_sec, 'interp y None or < -1e6', source='stemp_or_temp', len_y=len(series_bt) if hasattr(series_bt, '__len__') else None)
+                    return None
+                suffix = f"BT {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                return (suffix, self._bg_color_map.get('BT', '#888888'))
+            if raw_key == 'roast_et':
+                if not self.backgroundETcurve:
+                    self._log_bg_value_at_none(raw_key, t_sec, 'backgroundETcurve disabled')
+                    return None
+                if raw_key in self._bg_hover_cache:
+                    tx, arr = self._bg_hover_cache[raw_key]
+                    t = max(tx[0], min(tx[-1], t_sec)) if len(tx) > 0 else t_sec
+                    y = self.bg_interp_linear(tx, arr, t)
+                    if y is not None and y > -1e6:
+                        suffix = f"ET {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                        return (suffix, self._bg_color_map.get('ET', '#888888'))
+                    self._log_bg_value_at_none(raw_key, t_sec, 'cache used but y None or < -1e6', source='cache', y_is_none=(y is None))
+                    return None
+                series_et = None
+                for ln in getattr(self, '_bg_roast_lines', []):
+                    if getattr(ln, 'get_label', None) and (ln.get_label() or '').strip() == '_bg_ET':
+                        xd, yd = ln.get_xdata(), ln.get_ydata()
+                        if xd is not None and yd is not None and len(xd) >= 2 and len(xd) == len(yd):
+                            series_et = numpy.asarray(yd, dtype=numpy.double).ravel()
+                            tx_et = numpy.asarray(xd, dtype=float).ravel()
+                            y = self.bg_interp_linear(tx_et, series_et, t_sec)
+                            if y is not None and y > -1e6:
+                                suffix = f"ET {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                                return (suffix, self._bg_color_map.get('ET', '#888888'))
+                        break
+                if series_et is None:
+                    series_et = self._pick_bg_series(self.timeB, self.stemp1B, self.temp1B)
+                if series_et is None and getattr(self, 'l_back1', None) is not None and self.l_back1.get_visible():
+                    xd, yd = self.l_back1.get_xdata(), self.l_back1.get_ydata()
+                    if xd is not None and yd is not None:
+                        tx_list = list(numpy.asarray(xd).ravel())
+                        series_et = list(numpy.asarray(yd).ravel())
+                        if len(tx_list) == len(series_et) and len(tx_list) >= 2:
+                            series_et = numpy.asarray(series_et, dtype=numpy.double)
+                            y = self.bg_interp_linear(tx_list, series_et, t_sec)
+                            if y is not None and y > -1e6:
+                                suffix = f"ET {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                                return (suffix, self._bg_color_map.get('ET', '#888888'))
+                if series_et is None:
+                    src = 'stemp' if (self.stemp1B is not None and hasattr(self.stemp1B, '__len__') and len(self.stemp1B) == len(self.timeB)) else 'temp'
+                    self._log_bg_value_at_none(raw_key, t_sec, '_pick_bg_series returned None', source=src, len_stemp=len(self.stemp1B) if hasattr(self.stemp1B, '__len__') else None, len_temp=len(self.temp1B) if self.temp1B is not None else None)
+                    return None
+                y = self.bg_interp_linear(self.timeB, series_et, t_sec)
+                if y is None or y < -1e6:
+                    self._log_bg_value_at_none(raw_key, t_sec, 'interp y None or < -1e6', source='stemp_or_temp', len_y=len(series_et) if hasattr(series_et, '__len__') else None)
+                    return None
+                suffix = f"ET {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                return (suffix, self._bg_color_map.get('ET', '#888888'))
+            if raw_key == 'roast_ror_et':
+                if not self.DeltaETBflag:
+                    self._log_bg_value_at_none(raw_key, t_sec, 'DeltaETBflag off')
+                    return None
+                try:
+                    tsize = numpy.asarray(self.timeB).ravel().size
+                    dsize = numpy.asarray(self.delta1B).ravel().size if self.delta1B is not None else 0
+                    if tsize < 2 or dsize != tsize:
+                        self._log_bg_value_at_none(raw_key, t_sec, 'delta1B size != timeB or too short', len_timeB=tsize, len_delta1B=dsize)
+                        return None
+                except Exception:  # pylint: disable=broad-except
+                    return None
+                if raw_key in self._bg_hover_cache:
+                    tx, arr = self._bg_hover_cache[raw_key]
+                    tx_flat = numpy.asarray(tx).ravel()
+                    t = max(float(tx_flat.flat[0]), min(float(tx_flat.flat[-1]), t_sec)) if tx_flat.size > 0 else t_sec
+                    y = self.bg_interp_linear(tx, arr, t)
+                    if y is not None:
+                        suffix = f"RoR ET {float2float(RoRfromCtoF(y) if self.mode == 'F' else y, 1)}"
+                        return (suffix, self._bg_color_map.get('DeltaET', '#888888'))
+                    self._log_bg_value_at_none(raw_key, t_sec, 'cache used but y None', source='cache')
+                    return None
+                for ln in getattr(self, '_bg_delta_lines', []):
+                    if getattr(ln, 'get_label', None) and (ln.get_label() or '').strip() == '_bg_DeltaET':
+                        xd, yd = ln.get_xdata(), ln.get_ydata()
+                        if xd is not None and yd is not None and numpy.asarray(xd).ravel().size >= 2 and numpy.asarray(xd).ravel().size == numpy.asarray(yd).ravel().size:
+                            y = self.bg_interp_linear(xd, yd, t_sec)
+                            if y is not None:
+                                suffix = f"RoR ET {float2float(RoRfromCtoF(y) if self.mode == 'F' else y, 1)}"
+                                return (suffix, self._bg_color_map.get('DeltaET', '#888888'))
+                        break
+                if getattr(self, 'l_delta1B', None) is not None and self.l_delta1B.get_visible():
+                    xd, yd = self.l_delta1B.get_xdata(), self.l_delta1B.get_ydata()
+                    if xd is not None and yd is not None and numpy.asarray(xd).ravel().size >= 2:
+                        y = self.bg_interp_linear(xd, yd, t_sec)
+                        if y is not None:
+                            suffix = f"RoR ET {float2float(RoRfromCtoF(y) if self.mode == 'F' else y, 1)}"
+                            return (suffix, self._bg_color_map.get('DeltaET', '#888888'))
+                y = self.bg_interp_linear(self.timeB, self.delta1B, t_sec)
+                if y is None:
+                    self._log_bg_value_at_none(raw_key, t_sec, 'interp y None', source='delta1B', len_y=dsize)
+                    return None
+                suffix = f"RoR ET {float2float(RoRfromCtoF(y) if self.mode == 'F' else y, 1)}"
+                return (suffix, self._bg_color_map.get('DeltaET', '#888888'))
+            if raw_key == 'roast_ror_bt':
+                if not self.DeltaBTBflag:
+                    self._log_bg_value_at_none(raw_key, t_sec, 'DeltaBTBflag off')
+                    return None
+                try:
+                    tsize = numpy.asarray(self.timeB).ravel().size
+                    dsize = numpy.asarray(self.delta2B).ravel().size if self.delta2B is not None else 0
+                    if tsize < 2 or dsize != tsize:
+                        self._log_bg_value_at_none(raw_key, t_sec, 'delta2B size != timeB or too short', len_timeB=tsize, len_delta2B=dsize)
+                        return None
+                except Exception:  # pylint: disable=broad-except
+                    return None
+                if raw_key in self._bg_hover_cache:
+                    tx, arr = self._bg_hover_cache[raw_key]
+                    tx_flat = numpy.asarray(tx).ravel()
+                    t = max(float(tx_flat.flat[0]), min(float(tx_flat.flat[-1]), t_sec)) if tx_flat.size > 0 else t_sec
+                    y = self.bg_interp_linear(tx, arr, t)
+                    if y is not None:
+                        suffix = f"RoR BT {float2float(RoRfromCtoF(y) if self.mode == 'F' else y, 1)}"
+                        return (suffix, self._bg_color_map.get('DeltaBT', '#888888'))
+                    self._log_bg_value_at_none(raw_key, t_sec, 'cache used but y None', source='cache')
+                    return None
+                for ln in getattr(self, '_bg_delta_lines', []):
+                    if getattr(ln, 'get_label', None) and (ln.get_label() or '').strip() == '_bg_DeltaBT':
+                        xd, yd = ln.get_xdata(), ln.get_ydata()
+                        if xd is not None and yd is not None and numpy.asarray(xd).ravel().size >= 2 and numpy.asarray(xd).ravel().size == numpy.asarray(yd).ravel().size:
+                            y = self.bg_interp_linear(xd, yd, t_sec)
+                            if y is not None:
+                                suffix = f"RoR BT {float2float(RoRfromCtoF(y) if self.mode == 'F' else y, 1)}"
+                                return (suffix, self._bg_color_map.get('DeltaBT', '#888888'))
+                        break
+                if getattr(self, 'l_delta2B', None) is not None and self.l_delta2B.get_visible():
+                    xd, yd = self.l_delta2B.get_xdata(), self.l_delta2B.get_ydata()
+                    if xd is not None and yd is not None and numpy.asarray(xd).ravel().size >= 2:
+                        y = self.bg_interp_linear(xd, yd, t_sec)
+                        if y is not None:
+                            suffix = f"RoR BT {float2float(RoRfromCtoF(y) if self.mode == 'F' else y, 1)}"
+                            return (suffix, self._bg_color_map.get('DeltaBT', '#888888'))
+                y = self.bg_interp_linear(self.timeB, self.delta2B, t_sec)
+                if y is None:
+                    self._log_bg_value_at_none(raw_key, t_sec, 'interp y None', source='delta2B', len_y=dsize)
+                    return None
+                suffix = f"RoR BT {float2float(RoRfromCtoF(y) if self.mode == 'F' else y, 1)}"
+                return (suffix, self._bg_color_map.get('DeltaBT', '#888888'))
+            if raw_key.startswith('control_'):
+                try:
+                    ci = int(raw_key.split('_')[1])
+                except (IndexError, ValueError):  # pylint: disable=broad-except
+                    ci = -1
+                if ci < 0 or ci > 3:
+                    return None
+                # Prefer cached arrays (set when drawing bg in roast-like or classic)
+                tx = getattr(self, f'_bg_E{ci+1}_timex', None)
+                vals = getattr(self, f'_bg_E{ci+1}_values', None)
+                if tx is not None and vals is not None:
+                    val = self.bg_step_value(tx, vals, t_sec)
+                else:
+                    # Fallback: from background line xdata/ydata (classic layout)
+                    line = None
+                    if len(self._bg_controls_lines) > ci:
+                        line = self._bg_controls_lines[ci]
+                    else:
+                        line = getattr(self, f'l_backgroundeventtype{ci+1}dots', None)
+                    if line is None or not line.get_visible():
+                        return None
+                    xd, yd = line.get_xdata(), line.get_ydata()
+                    if xd is None or yd is None:
+                        return None
+                    val = self.bg_step_value(list(numpy.asarray(xd).ravel()), list(numpy.asarray(yd).ravel()), t_sec)
+                if val is None:
+                    return None
+                pct = max(0, min(100, int(round(float(val)))))
+                lbl = self.etypesf(ci)
+                suffix = f"{lbl} {pct}%" if lbl else f"{pct}%"
+                return (suffix, self._bg_color_map.get(lbl, self._bg_color_map.get(f'E{ci+1}', '#888888')))
+            if raw_key.startswith('extra_'):
+                idx = raw_key.replace('extra_', '')
+                if not idx.isdigit():
+                    self._log_bg_value_at_none(raw_key, t_sec, 'extra_ key not digit')
+                    return None
+                extra_i = int(idx)
+                if raw_key in self._bg_hover_cache:
+                    tx, arr = self._bg_hover_cache[raw_key]
+                    t = max(tx[0], min(tx[-1], t_sec)) if len(tx) > 0 else t_sec
+                    y = self.bg_interp_linear(tx, arr, t)
+                    if y is not None and y > -1e6:
+                        lbl = 'XT' if extra_i == 0 else 'YT'
+                        suffix = f"{lbl} {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                        return (suffix, self._bg_color_map.get(lbl, '#888888'))
+                    self._log_bg_value_at_none(raw_key, t_sec, 'cache used but y None or < -1e6', source='cache', y_is_none=(y is None))
+                    return None
+                if extra_i == 0 and self.xtcurveidx > 0:
+                    n3 = (self.xtcurveidx - 1) // 2
+                    if n3 >= len(self.extratimexB):
+                        self._log_bg_value_at_none(raw_key, t_sec, 'extra_0 n3>=len(extratimexB)', n3=n3, len_extratimexB=len(self.extratimexB) if hasattr(self, 'extratimexB') else None)
+                        return None
+                    tx = self.extratimexB[n3]
+                    if tx is None or len(tx) == 0:
+                        self._log_bg_value_at_none(raw_key, t_sec, 'extra_0 tx None or empty', source='stemp/temp', len_tx=len(tx) if tx is not None else 0)
+                        return None
+                    t_ex = max(tx[0], min(tx[-1], t_sec))
+                    use_t1 = (self.xtcurveidx % 2 == 1)
+                    arr = None
+                    if use_t1 and n3 < len(self.stemp1BX) and self.stemp1BX[n3] is not None and len(self.stemp1BX[n3]) == len(tx):
+                        arr = self.stemp1BX[n3]
+                    elif use_t1 and n3 < len(self.temp1BX) and len(self.temp1BX[n3]) == len(tx):
+                        arr = numpy.asarray(self.temp1BX[n3], dtype=numpy.double)
+                    elif not use_t1 and n3 < len(self.stemp2BX) and self.stemp2BX[n3] is not None and len(self.stemp2BX[n3]) == len(tx):
+                        arr = self.stemp2BX[n3]
+                    elif not use_t1 and n3 < len(self.temp2BX) and len(self.temp2BX[n3]) == len(tx):
+                        arr = numpy.asarray(self.temp2BX[n3], dtype=numpy.double)
+                    if arr is None:
+                        self._log_bg_value_at_none(raw_key, t_sec, 'extra_0 arr None (no stemp/temp match)', source='stemp_or_temp', n3=n3, len_tx=len(tx))
+                        return None
+                    y = self.bg_interp_linear(tx, arr, t_ex)
+                    if y is not None and y > -1e6:
+                        suffix = f"XT {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                        return (suffix, self._bg_color_map.get('XT', '#888888'))
+                    self._log_bg_value_at_none(raw_key, t_sec, 'extra_0 interp y None or < -1e6', source='stemp_or_temp', tx_range=[tx[0], tx[-1]] if len(tx) >= 2 else None)
+                    return None
+                if extra_i == 1 and self.ytcurveidx > 0:
+                    n4 = (self.ytcurveidx - 1) // 2
+                    if n4 >= len(self.extratimexB):
+                        self._log_bg_value_at_none(raw_key, t_sec, 'extra_1 n4>=len(extratimexB)', n4=n4, len_extratimexB=len(self.extratimexB) if hasattr(self, 'extratimexB') else None)
+                        return None
+                    tx = self.extratimexB[n4]
+                    if tx is None or len(tx) == 0:
+                        self._log_bg_value_at_none(raw_key, t_sec, 'extra_1 tx None or empty', source='stemp/temp', len_tx=len(tx) if tx is not None else 0)
+                        return None
+                    t_ex = max(tx[0], min(tx[-1], t_sec))
+                    use_t1 = (self.ytcurveidx % 2 == 1)
+                    arr = None
+                    if use_t1 and n4 < len(self.stemp1BX) and self.stemp1BX[n4] is not None and len(self.stemp1BX[n4]) == len(tx):
+                        arr = self.stemp1BX[n4]
+                    elif use_t1 and n4 < len(self.temp1BX) and len(self.temp1BX[n4]) == len(tx):
+                        arr = numpy.asarray(self.temp1BX[n4], dtype=numpy.double)
+                    elif not use_t1 and n4 < len(self.stemp2BX) and self.stemp2BX[n4] is not None and len(self.stemp2BX[n4]) == len(tx):
+                        arr = self.stemp2BX[n4]
+                    elif not use_t1 and n4 < len(self.temp2BX) and len(self.temp2BX[n4]) == len(tx):
+                        arr = numpy.asarray(self.temp2BX[n4], dtype=numpy.double)
+                    if arr is None:
+                        self._log_bg_value_at_none(raw_key, t_sec, 'extra_1 arr None (no stemp/temp match)', source='stemp_or_temp', n4=n4, len_tx=len(tx))
+                        return None
+                    y = self.bg_interp_linear(tx, arr, t_ex)
+                    if y is not None and y > -1e6:
+                        suffix = f"YT {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
+                        return (suffix, self._bg_color_map.get('YT', '#888888'))
+                    self._log_bg_value_at_none(raw_key, t_sec, 'extra_1 interp y None or < -1e6', source='stemp_or_temp', tx_range=[tx[0], tx[-1]] if len(tx) >= 2 else None)
+                    return None
+                self._log_bg_value_at_none(raw_key, t_sec, 'extra: xtcurveidx/ytcurveidx not >0 or no branch taken', xtcurveidx=getattr(self, 'xtcurveidx', None), ytcurveidx=getattr(self, 'ytcurveidx', None))
+                return None
+        except Exception as e:  # pylint: disable=broad-except
+            if _ROAST_DEBUG_ENABLED:
+                _roast_debug_log_json({'event': '_bg_value_at_exception', 'raw_key': raw_key, 't_sec': t_sec, 'error': str(e)})
+            return None
+        return None
+
     def build_hover_bubble_lines(self, t_sec:float) -> list[tuple[str, str]]:
         """Build ordered list of (text, color) for the hover bubble from config and current data.
-        Roast data (time, BT, ET, RoR, extra) first, then controls. Only enabled and ordered by hover_bubble_config.
-        Populates self._hover_line_map (label -> Line2D) so bubble text colors match curve colors via line.get_color()."""
+        Uses canonical row order; active and BG rows are paired (e.g. Drum then BG_Drum). BG-only mode
+        shows only BG_ rows when no active profile. Populates self._hover_line_map (label -> Line2D)."""
+        # Canonical order of bubble rows (roast, then extra, then controls)
+        ordered_keys: list[str] = [
+            'roast_bt', 'roast_et', 'roast_ror_et', 'roast_ror_bt',
+            'extra_0', 'extra_1',
+            'control_0', 'control_1', 'control_2', 'control_3',
+        ]
         self._hover_line_map = {}
         for ax in (self.ax, self.delta_ax):
             if ax is None:
@@ -4528,13 +5088,12 @@ class tgraphcanvas(QObject):
                     continue
                 if lbl and lbl != '?':
                     self._hover_line_map[lbl] = line
-        line_specs: list[tuple[str, str, str]] = []  # (raw_key, text, color)
-        # Time
+
         time_text = f"Time: {stringfromseconds(t_sec)}"
         time_color = '#e8e8e8'
-        line_specs.append(('time', time_text, time_color))
 
-        # Roast curves from ax and delta_ax (with raw_key per line); if controls missing show only roast lines
+        # 1) Build active_map: raw_key -> (text, color) for metrics that have a value at t_sec
+        active_map: dict[str, tuple[str, str]] = {}
         extra_idx = 0
         for ax in (self.ax, self.delta_ax):
             if ax is None:
@@ -4566,15 +5125,25 @@ class tgraphcanvas(QObject):
                 raw_key = self._roast_hover_curve_raw_key(line, is_ror_axis, extra_idx)
                 if raw_key.startswith('extra_'):
                     extra_idx += 1
-                line_specs.append((raw_key, disp, color))
+                active_map[raw_key] = (disp, color)
 
-        # Controls from ax_controls
         if self.ax_controls is not None:
-            for ci, line in enumerate(self.ax_controls.lines):
+            for line in self.ax_controls.lines:
                 if not line.get_visible():
                     continue
                 lbl = (line.get_label() or '').strip()
                 if lbl.startswith('_') or line is self._roast_hover_line_controls:
+                    continue
+                ci = None
+                if line is getattr(self, 'l_eventtype1dots', None):
+                    ci = 0
+                elif line is getattr(self, 'l_eventtype2dots', None):
+                    ci = 1
+                elif line is getattr(self, 'l_eventtype3dots', None):
+                    ci = 2
+                elif line is getattr(self, 'l_eventtype4dots', None):
+                    ci = 3
+                if ci is None:
                     continue
                 y_val = self._control_line_value_at(line, t_sec)
                 if y_val is None or (isinstance(y_val, float) and (math.isnan(y_val) or y_val < -1e6 or y_val > 1e6)):
@@ -4587,7 +5156,34 @@ class tgraphcanvas(QObject):
                     ec = '#e8e8e8'
                 pct = max(0, min(100, int(round(float(y_val)))))
                 text = f"{lbl} {pct}%" if lbl else f"{pct}%"
-                line_specs.append((f'control_{ci}', text, ec))
+                active_map[f'control_{ci}'] = (text, ec)
+
+        has_active = bool(active_map)
+        include_background = bool(self.background and self.backgroundprofile is not None and len(self.timeB) > 0)
+        t_bg = t_sec
+        if include_background and len(self.timeB) > 0:
+            t_bg = max(self.timeB[0], min(self.timeB[-1], t_sec))
+
+        # 2) Build expanded: time first; for each ordered_keys either (active then BG) or BG-only; single loop only
+        expanded: list[tuple[str, str, str]] = [('time', time_text, time_color)]
+        for raw_key in ordered_keys:
+            if has_active and raw_key in active_map:
+                text, color = active_map[raw_key]
+                expanded.append((raw_key, text, color))
+                if include_background and self.bg_enabled_for_raw_key(raw_key):
+                    bg = self._bg_value_at(raw_key, t_bg)
+                    if bg is not None:
+                        suffix, bg_color = bg
+                        expanded.append((raw_key + '_bg', 'BG_' + suffix, bg_color))
+            else:
+                # bg-only: no active row; add BG row when enabled and data present
+                if include_background and self.bg_enabled_for_raw_key(raw_key):
+                    bg = self._bg_value_at(raw_key, t_bg)
+                    if bg is not None:
+                        suffix, bg_color = bg
+                        expanded.append((raw_key + '_bg', 'BG_' + suffix, bg_color))
+        line_specs = expanded
+        raw_keys_before_filter = [r[0] for r in expanded]
 
         # Apply config: order and filter
         config = getattr(self, 'hover_bubble_config', None) or []
@@ -4596,16 +5192,33 @@ class tgraphcanvas(QObject):
         default_order = ['time', 'roast_bt', 'roast_et', 'roast_ror', 'extra_devices', 'controls']
         order = [e['key'] for e in config if isinstance(e, dict) and e.get('key')] or default_order
         result: list[tuple[str, str]] = []
+        result_raw_keys: list[str] = []
         for config_key in order:
             if not config_by_key.get(config_key, True):
                 continue
             for raw_key, text, color in line_specs:
                 if self._hover_bubble_raw_key_to_config_key(raw_key) == config_key:
                     result.append((text, color))
+                    result_raw_keys.append(raw_key)
         if len(result) == 0 and line_specs:
             result = [(time_text, time_color)]
+            result_raw_keys = ['time']
         if len(result) == 0:
             result = [(stringfromseconds(t_sec), time_color)]
+            result_raw_keys = ['time']
+
+        # ROAST_DEBUG NDJSON: diagnose where BG roast lines go (before vs after filter)
+        if _ROAST_DEBUG_ENABLED:
+            _roast_debug_log_json({
+                'event': 'build_hover_bubble_lines',
+                't_sec': t_sec,
+                't_bg': t_bg,
+                'include_background': include_background,
+                'has_active': has_active,
+                'raw_keys_before_filter': raw_keys_before_filter,
+                'raw_keys_after_filter': result_raw_keys,
+            })
+
         return result
 
     def _roast_hover_update(self, t_sec:float, event:'MouseEvent|None' = None) -> None:
@@ -4721,11 +5334,11 @@ class tgraphcanvas(QObject):
                     }
                     debug_dir = _get_roast_debug_dir()
                     os.makedirs(debug_dir, exist_ok=True)
-                    with open(os.path.join(debug_dir, 'hover_state.json'), 'w', encoding='utf-8') as f:
+                    with open(_roast_debug_artifact_path('hover_state', '.json'), 'w', encoding='utf-8') as f:
                         json.dump(state, f, indent=2, default=str)
                     # First hover snapshot (ROAST_DEBUG=1)
                     try:
-                        _snapshot_path = os.path.join(debug_dir, 'roest_hover_snapshot.png')
+                        _snapshot_path = _roast_debug_artifact_path('roest_hover_snapshot', '.png')
                         self.fig.canvas.draw()
                         self.fig.savefig(_snapshot_path, dpi=getattr(self, 'dpi', 100),
                                         facecolor=self.fig.get_facecolor(), bbox_inches=None)
@@ -10925,6 +11538,9 @@ class tgraphcanvas(QObject):
                     self.fig.clf()
                     self.onmove_cid = None  # ensure_hover_connected() will reconnect
                     self.ax_background = None
+                    for _lst in (self._bg_roast_lines, self._bg_controls_lines, self._bg_delta_lines):
+                        _lst.clear()
+                    self._bg_hover_cache.clear()
                     self._roast_hover_line = None
                     self.roest_vline_roast = None
                     self.roest_vline_controls = None
@@ -10947,7 +11563,7 @@ class tgraphcanvas(QObject):
                         except Exception:  # pylint: disable=broad-except
                             pass
                     self._roast_hover_markers_dict = {}
-                    gs = GridSpec(4, 1, height_ratios=[10, 0.5, 2.5, 0.7], hspace=0.02,
+                    gs = GridSpec(4, 1, height_ratios=[10, 0.5, 2.0, 0.7], hspace=0.01,
                                   left=0.067, right=0.925, top=0.93, bottom=0.08)
                     self.ax = self.fig.add_subplot(gs[0], facecolor=self.palette['background'])
                     self.ax_events = self.fig.add_subplot(gs[1], sharex=self.ax, facecolor='none')
@@ -10972,6 +11588,10 @@ class tgraphcanvas(QObject):
                     with warnings.catch_warnings():
                         warnings.simplefilter('ignore')
                         self.ax.clear()
+                    # clear() removed background artists from axes — drop refs so we redraw cleanly
+                    for _lst in (self._bg_roast_lines, self._bg_controls_lines, self._bg_delta_lines):
+                        _lst.clear()
+                    self._bg_hover_cache.clear()
                     # clear() removed hover artists from axes; invalidate refs so _roast_hover_ensure_artists() recreates them
                     self._roast_hover_line = None
                     self.roest_vline_roast = None
@@ -11019,17 +11639,15 @@ class tgraphcanvas(QObject):
                     self._roast_hover_line_controls = None
                     self.roest_vline_controls = None
                     self.ax_controls.set_facecolor(self.palette['background'])
-                    self.ax_controls.set_ylim(0, 100)
+                    self.ax_controls.set_ylim(-10, 110)
                     self.ax_controls.set_ylabel(QApplication.translate('Label', '% / RPM'), color=self.palette['ylabel'], fontsize='small')
                     self.ax_controls.tick_params(axis='x', labelbottom=False)
                     self.ax_controls.yaxis.tick_left()
                     self.ax_controls.yaxis.set_label_position('left')
-                    self.ax_controls.yaxis.set_major_locator(ticker.MultipleLocator(10))
-                    self.ax_controls.yaxis.set_minor_locator(ticker.MultipleLocator(5))
+                    self.ax_controls.set_yticks([0, 25, 50, 75, 100])
+                    self.ax_controls.yaxis.set_minor_locator(ticker.NullLocator())
                     self.ax_controls.grid(True, which='major', axis='y', color=self.palette.get('grid', '#888'),
                                         linestyle=self.gridstyles[self.gridlinestyle], linewidth=self.gridthickness, alpha=self.gridalpha)
-                    self.ax_controls.grid(True, which='minor', axis='y', color=self.palette.get('grid', '#888'),
-                                        linestyle=':', linewidth=max(0.5, self.gridthickness * 0.6), alpha=self.gridalpha * 0.7)
                 if self.ax_phases is not None:
                     with warnings.catch_warnings():
                         warnings.simplefilter('ignore')
@@ -11040,7 +11658,7 @@ class tgraphcanvas(QObject):
                     self.ax_phases.set_ylim(0, 1)
                     self.ax_phases.set_yticks([])
                     self.ax_phases.tick_params(axis='y', which='both', left=False, labelleft=False)
-                    self.ax_phases.tick_params(axis='x', which='both', labelbottom=True)
+                    self.ax_phases.tick_params(axis='x', which='both', labelbottom=False)
                 rcParams['xtick.color'] = xlabel_alpha_color
                 rcParams['ytick.color'] = ylabel_alpha_color
                 prop = self.aw.mpl_fontproperties.copy()
@@ -11051,7 +11669,7 @@ class tgraphcanvas(QObject):
                     self.ax.set_ylabel(self.mode, color=self.palette['ylabel'], rotation=0, labelpad=10, fontsize='medium', fontfamily=prop.get_family())
                 self.set_xlabel(self.default_xlabel_text())
                 two_ax_mode = self.twoAxisMode()
-                self.ax.tick_params(axis='x', which='both', bottom=True, top=False, direction='inout', labelbottom=False)
+                self.ax.tick_params(axis='x', which='both', bottom=True, top=False, direction='inout', labelbottom=True)
                 self.ax.tick_params(axis='y', which='both', right=False, bottom=True, top=False, direction='inout', labelbottom=True)
                 self.ax.fmt_ydata = self.fmt_data
                 self.ax.fmt_xdata = self.fmt_timedata
@@ -11090,6 +11708,210 @@ class tgraphcanvas(QObject):
                     drop_idx = self.timeindex[6]
                 self.xaxistosm(redraw=False)
                 self._draw_phases_bar()
+                # ----- Roast-like background: BT/ET/extra on ax, E1-E4 step on ax_controls, delta on delta_ax. Cached data (timeB, stemp1B, etc.) only from load/redraw, never on mouse move.
+                if self.background and self.backgroundprofile is not None and len(self.timeB) > 0:
+                    # #region agent log
+                    try:
+                        _roast_debug_log_json({
+                            'event': 'roast_like_bg_flags',
+                            'background': self.background,
+                            'backgroundprofile_is_none': self.backgroundprofile is None,
+                            'len_timeB': len(self.timeB),
+                            'backgroundETcurve': self.backgroundETcurve,
+                            'backgroundBTcurve': self.backgroundBTcurve,
+                            'DeltaETBflag': self.DeltaETBflag,
+                            'DeltaBTBflag': self.DeltaBTBflag,
+                            'xtcurveidx': getattr(self, 'xtcurveidx', None),
+                            'ytcurveidx': getattr(self, 'ytcurveidx', None),
+                        })
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                    # #endregion
+                    self._bg_color_map.clear()
+                    _bg_alpha = 0.55
+                    _bg_zorder = 4
+                    _bg_base: dict[str, Any] = dict(marker='None', markersize=0, alpha=_bg_alpha, zorder=_bg_zorder, animated=False, sketch_params=None, path_effects=[])
+                    _bg_ls = (0, (4, 2))  # dashed for all background lines (roast, controls, delta)
+                    bcharge_idx = self.timeindexB[0] if (self.timeindexB[0] > -1) else 0
+                    bdrop_idx = (self.timeindexB[6] if self.timeindexB[6] > 0 else len(self.timeB) - 1)
+                    if re_smooth_background and len(self.timeB) > 1:
+                        tb_lin = numpy.linspace(self.timeB[0], self.timeB[-1], len(self.timeB))
+                        self.stemp1B = self.smooth_list(self.timeB, self.temp1B, window_len=self.curvefilter, decay_smoothing=decay_smoothing_p, a_lin=tb_lin, delta=False)
+                        self.stemp2B = self.smooth_list(self.timeB, self.temp2B, window_len=self.curvefilter, decay_smoothing=decay_smoothing_p, a_lin=tb_lin, delta=False)
+                        if self.xtcurveidx > 0:
+                            n3 = (self.xtcurveidx - 1) // 2
+                            if n3 < len(self.extratimexB) and n3 < len(self.temp1BX) and n3 < len(self.temp2BX):
+                                tx = self.extratimexB[n3]
+                                if tx and len(tx) > 1:
+                                    tx_lin = numpy.linspace(tx[0], tx[-1], len(tx))
+                                    if self.xtcurveidx % 2 and n3 < len(self.stemp1BX):
+                                        self.stemp1BX[n3] = self.smooth_list(tx, self.temp1BX[n3], window_len=self.curvefilter, decay_smoothing=decay_smoothing_p, a_lin=tx_lin, delta=False)
+                                    elif not self.xtcurveidx % 2 and n3 < len(self.stemp2BX):
+                                        self.stemp2BX[n3] = self.smooth_list(tx, self.temp2BX[n3], window_len=self.curvefilter, decay_smoothing=decay_smoothing_p, a_lin=tx_lin, delta=False)
+                        if self.ytcurveidx > 0:
+                            n4 = (self.ytcurveidx - 1) // 2
+                            if n4 < len(self.extratimexB) and n4 < len(self.temp1BX) and n4 < len(self.temp2BX):
+                                tx = self.extratimexB[n4]
+                                if tx and len(tx) > 1:
+                                    tx_lin = numpy.linspace(tx[0], tx[-1], len(tx))
+                                    if self.ytcurveidx % 2 and n4 < len(self.stemp1BX):
+                                        self.stemp1BX[n4] = self.smooth_list(tx, self.temp1BX[n4], window_len=self.curvefilter, decay_smoothing=decay_smoothing_p, a_lin=tx_lin, delta=False)
+                                    elif not self.ytcurveidx % 2 and n4 < len(self.stemp2BX):
+                                        self.stemp2BX[n4] = self.smooth_list(tx, self.temp2BX[n4], window_len=self.curvefilter, decay_smoothing=decay_smoothing_p, a_lin=tx_lin, delta=False)
+                    stemp1B = self.stemp1B if len(self.stemp1B) == len(self.timeB) else numpy.array(self.temp1B, dtype=numpy.double)
+                    stemp2B = self.stemp2B if len(self.stemp2B) == len(self.timeB) else numpy.array(self.temp2B, dtype=numpy.double)
+                    if self.backgroundETcurve:
+                        if self.backgroundShowFullflag:
+                            temp_etb = stemp1B
+                        elif not self.autotimex or self.autotimexMode == 0:
+                            temp_etb = numpy.concatenate((numpy.full(bcharge_idx, numpy.nan, dtype=numpy.double), stemp1B[bcharge_idx:bdrop_idx+1], numpy.full(len(self.timeB) - bdrop_idx - 1, numpy.nan, dtype=numpy.double)))
+                        else:
+                            temp_etb = numpy.concatenate((stemp1B[0:bdrop_idx+1], numpy.full(len(self.timeB) - bdrop_idx - 1, numpy.nan, dtype=numpy.double)))
+                    else:
+                        temp_etb = numpy.full(len(self.timeB), numpy.nan, dtype=numpy.double)
+                    temp_etb = numpy.ma.masked_where(temp_etb == -1, temp_etb)
+                    if self.backgroundBTcurve:
+                        if self.backgroundShowFullflag:
+                            temp_btb = stemp2B
+                        elif not self.autotimex or self.autotimexMode == 0:
+                            temp_btb = numpy.concatenate((numpy.full(bcharge_idx, numpy.nan, dtype=numpy.double), stemp2B[bcharge_idx:bdrop_idx+1], numpy.full(len(self.timeB) - bdrop_idx - 1, numpy.nan, dtype=numpy.double)))
+                        else:
+                            temp_btb = numpy.concatenate((stemp2B[0:bdrop_idx+1], numpy.full(len(self.timeB) - bdrop_idx - 1, numpy.nan, dtype=numpy.double)))
+                    else:
+                        temp_btb = numpy.full(len(self.timeB), numpy.nan, dtype=numpy.double)
+                    temp_btb = numpy.ma.masked_where(temp_btb == -1, temp_btb)
+                    if self.backgroundETcurve:
+                        _kw = {**_bg_base, 'linewidth': self.ETlinewidth, 'linestyle': _bg_ls, 'drawstyle': self.ETbackdrawstyle}
+                        ln_et, = self.ax.plot(self.timeB, temp_etb, color=self.backgroundmetcolor, label='_bg_ET', **_kw)
+                        self._bg_roast_lines.append(ln_et)
+                        self._bg_color_map['ET'] = self._hover_color_to_hex(self.backgroundmetcolor)
+                        self._bg_hover_cache['roast_et'] = (self.timeB, temp_etb)
+                    if self.backgroundBTcurve:
+                        _kw = {**_bg_base, 'linewidth': self.BTlinewidth, 'linestyle': _bg_ls, 'drawstyle': self.BTbackdrawstyle}
+                        ln_bt, = self.ax.plot(self.timeB, temp_btb, color=self.backgroundbtcolor, label='_bg_BT', **_kw)
+                        self._bg_roast_lines.append(ln_bt)
+                        self._bg_color_map['BT'] = self._hover_color_to_hex(self.backgroundbtcolor)
+                        self._bg_hover_cache['roast_bt'] = (self.timeB, temp_btb)
+                    if self.xtcurveidx > 0 and self.extra_channel_visible(self.xtcurveidx):
+                        idx3 = self.xtcurveidx - 1
+                        n3 = idx3 // 2
+                        if len(self.stemp1BX) > n3 and len(self.stemp2BX) > n3 and len(self.extratimexB) > n3:
+                            stemp3B = self.stemp1BX[n3] if self.xtcurveidx % 2 else self.stemp2BX[n3]
+                            if not self.backgroundShowFullflag:
+                                if not self.autotimex or self.autotimexMode == 0:
+                                    stemp3B = numpy.concatenate((numpy.full(bcharge_idx, numpy.nan, dtype=numpy.double), stemp3B[bcharge_idx:bdrop_idx+1], numpy.full(len(self.timeB) - bdrop_idx - 1, numpy.nan, dtype=numpy.double)))
+                                else:
+                                    stemp3B = numpy.concatenate((stemp3B[0:bdrop_idx+1], numpy.full(len(self.timeB) - bdrop_idx - 1, numpy.nan, dtype=numpy.double)))
+                            stemp3B = numpy.ma.masked_where(stemp3B == -1, stemp3B)
+                            use_delta = self.delta_ax is not None and ((self.xtcurveidx % 2 and len(self.aw.extraDelta1b) > n3 and self.aw.extraDelta1b[n3]) or (not self.xtcurveidx % 2 and len(self.aw.extraDelta2b) > n3 and self.aw.extraDelta2b[n3]))
+                            trans = self.delta_ax.transData if use_delta else self.ax.transData
+                            _lw_xt = self.extralinewidths1[n3] if self.xtcurveidx % 2 else self.extralinewidths2[n3]
+                            _kw = {**_bg_base, 'linewidth': _lw_xt, 'linestyle': _bg_ls, 'drawstyle': self.XTbackdrawstyle}
+                            ln_x, = self.ax.plot(self.extratimexB[n3], stemp3B, transform=trans, color=self.backgroundxtcolor, label='_bg_XT', **_kw)
+                            self._bg_roast_lines.append(ln_x)
+                            self._bg_color_map['XT'] = self._hover_color_to_hex(self.backgroundxtcolor)
+                            self._bg_hover_cache['extra_0'] = (self.extratimexB[n3], stemp3B)
+                    if self.ytcurveidx > 0 and self.extra_channel_visible(self.ytcurveidx):
+                        idx4 = self.ytcurveidx - 1
+                        n4 = idx4 // 2
+                        if len(self.stemp1BX) > n4 and len(self.stemp2BX) > n4 and len(self.extratimexB) > n4:
+                            stemp4B = self.stemp1BX[n4] if self.ytcurveidx % 2 else self.stemp2BX[n4]
+                            if not self.backgroundShowFullflag:
+                                if not self.autotimex or self.autotimexMode == 0:
+                                    stemp4B = numpy.concatenate((numpy.full(bcharge_idx, numpy.nan, dtype=numpy.double), stemp4B[bcharge_idx:bdrop_idx+1], numpy.full(len(self.timeB) - bdrop_idx - 1, numpy.nan, dtype=numpy.double)))
+                                else:
+                                    stemp4B = numpy.concatenate((stemp4B[0:bdrop_idx+1], numpy.full(len(self.timeB) - bdrop_idx - 1, numpy.nan, dtype=numpy.double)))
+                            stemp4B = numpy.ma.masked_where(stemp4B == -1, stemp4B)
+                            use_delta = self.delta_ax is not None and ((self.ytcurveidx % 2 and len(self.aw.extraDelta1b) > n4 and self.aw.extraDelta1b[n4]) or (not self.ytcurveidx % 2 and len(self.aw.extraDelta2b) > n4 and self.aw.extraDelta2b[n4]))
+                            trans = self.delta_ax.transData if use_delta else self.ax.transData
+                            _lw_yt = self.extralinewidths1[n4] if self.ytcurveidx % 2 else self.extralinewidths2[n4]
+                            _kw = {**_bg_base, 'linewidth': _lw_yt, 'linestyle': _bg_ls, 'drawstyle': self.YTbackdrawstyle}
+                            ln_y, = self.ax.plot(self.extratimexB[n4], stemp4B, transform=trans, color=self.backgroundytcolor, label='_bg_YT', **_kw)
+                            self._bg_roast_lines.append(ln_y)
+                            self._bg_color_map['YT'] = self._hover_color_to_hex(self.backgroundytcolor)
+                            self._bg_hover_cache['extra_1'] = (self.extratimexB[n4], stemp4B)
+                    if self.ax_controls is not None and len(self.backgroundEvents) > 0:
+                        event_pos_offset = self.eventpositionbars[0]
+                        event_pos_factor = self.eventpositionbars[1] - self.eventpositionbars[0]
+                        E1xB, E2xB, E3xB, E4xB = [], [], [], []
+                        E1y_pct, E2y_pct, E3y_pct, E4y_pct = [], [], [], []
+                        E1_CHARGE_pct = E2_CHARGE_pct = E3_CHARGE_pct = E4_CHARGE_pct = None
+                        E1_last, E2_last, E3_last, E4_last = 0, 0, 0, 0
+                        for i, event_idx in enumerate(self.backgroundEvents):
+                            txx = self.timeB[event_idx]
+                            pos = max(0, self.eventsInternal2ExternalValue(self.backgroundEvalues[i]))
+                            skip = (not self.backgroundShowFullflag and (((not self.autotimex or self.autotimexMode == 0) and event_idx < bcharge_idx) or event_idx > bdrop_idx))
+                            if self.backgroundEtypes[i] == 0 and self.showEtypes[0]:
+                                if skip:
+                                    if self.timeindexB[0] > -1 and txx < self.timeB[self.timeindexB[0]]:
+                                        E1_CHARGE_pct = float(pos)
+                                    continue
+                                E1xB.append(self.timeB[event_idx])
+                                E1y_pct.append(float(pos))
+                                E1_last = i
+                            elif self.backgroundEtypes[i] == 1 and self.showEtypes[1]:
+                                if skip:
+                                    if self.timeindexB[0] > -1 and txx < self.timeB[self.timeindexB[0]]:
+                                        E2_CHARGE_pct = float(pos)
+                                    continue
+                                E2xB.append(self.timeB[event_idx])
+                                E2y_pct.append(float(pos))
+                                E2_last = i
+                            elif self.backgroundEtypes[i] == 2 and self.showEtypes[2]:
+                                if skip:
+                                    if self.timeindexB[0] > -1 and txx < self.timeB[self.timeindexB[0]]:
+                                        E3_CHARGE_pct = float(pos)
+                                    continue
+                                E3xB.append(self.timeB[event_idx])
+                                E3y_pct.append(float(pos))
+                                E3_last = i
+                            elif self.backgroundEtypes[i] == 3 and self.showEtypes[3]:
+                                if skip:
+                                    if self.timeindexB[0] > -1 and txx < self.timeB[self.timeindexB[0]]:
+                                        E4_CHARGE_pct = float(pos)
+                                    continue
+                                E4xB.append(self.timeB[event_idx])
+                                E4y_pct.append(float(pos))
+                                E4_last = i
+                        def _bg_step(Ex: list[float], Ey_pct: list[float], E_CHARGE_pct: float | None, E_last: int, color: Any, etype_idx: int) -> None:
+                            if not Ex or len(Ey_pct) != len(Ex):
+                                return
+                            if self.timeindexB[6] > 0 and self.extendevents and E_last >= 0 and len(self.backgroundEvents) > E_last and self.timeindexB[6] < len(self.timeB) and self.timeB[self.timeindexB[6]] > self.timeB[self.backgroundEvents[E_last]]:
+                                Ex = list(Ex) + [self.timeB[self.timeindexB[6]]]
+                                Ey_pct = list(Ey_pct) + [Ey_pct[-1]]
+                            if E_CHARGE_pct is not None and len(Ey_pct) > 1 and Ey_pct[0] != E_CHARGE_pct and self.timeindexB[0] > -1:
+                                x_ = [self.timeB[self.timeindexB[0]]] + list(Ex)
+                                y_ = [E_CHARGE_pct] + list(Ey_pct)
+                            else:
+                                x_ = list(Ex)
+                                y_ = list(Ey_pct)
+                            y_arr = numpy.clip(numpy.array(y_, dtype=float), 0, 100)
+                            _lw = self.Evaluelinethickness[etype_idx]
+                            _kw = {**_bg_base, 'linewidth': _lw, 'linestyle': _bg_ls, 'drawstyle': 'steps-post'}
+                            ln, = self.ax_controls.plot(numpy.array(x_), y_arr, color=color, label=f'_bg_E{etype_idx+1}', **_kw)
+                            self._bg_controls_lines.append(ln)
+                            self._bg_color_map[self.etypesf(etype_idx)] = self._hover_color_to_hex(color)
+                            # Cache for bubble BG_ values (bg_step_value); no Line2D used in _bg_value_at when cache present
+                            setattr(self, f'_bg_E{etype_idx+1}_timex', list(x_))
+                            setattr(self, f'_bg_E{etype_idx+1}_values', list(y_arr))
+                        _bg_step(E1xB, E1y_pct, E1_CHARGE_pct, E1_last, self.EvalueColor[0], 0)
+                        _bg_step(E2xB, E2y_pct, E2_CHARGE_pct, E2_last, self.EvalueColor[1], 1)
+                        _bg_step(E3xB, E3y_pct, E3_CHARGE_pct, E3_last, self.EvalueColor[2], 2)
+                        _bg_step(E4xB, E4y_pct, E4_CHARGE_pct, E4_last, self.EvalueColor[3], 3)
+                    if (self.DeltaETBflag or self.DeltaBTBflag) and self.delta_ax is not None and len(self.timeB) == len(self.delta1B) and len(self.timeB) == len(self.delta2B):
+                        trans = self.delta_ax.transData
+                        if self.DeltaETBflag:
+                            _kw = {**_bg_base, 'linewidth': self.ETBdeltalinewidth, 'linestyle': _bg_ls, 'drawstyle': self.ETBdeltadrawstyle}
+                            ln_d1, = self.ax.plot(self.timeB, numpy.array(self.delta1B), transform=trans, color=self.backgrounddeltaetcolor, label='_bg_DeltaET', **_kw)
+                            self._bg_delta_lines.append(ln_d1)
+                            self._bg_color_map['DeltaET'] = self._hover_color_to_hex(self.backgrounddeltaetcolor)
+                            self._bg_hover_cache['roast_ror_et'] = (self.timeB, numpy.array(self.delta1B))
+                        if self.DeltaBTBflag:
+                            _kw = {**_bg_base, 'linewidth': self.BTBdeltalinewidth, 'linestyle': _bg_ls, 'drawstyle': self.BTBdeltadrawstyle}
+                            ln_d2, = self.ax.plot(self.timeB, numpy.array(self.delta2B), transform=trans, color=self.backgrounddeltabtcolor, label='_bg_DeltaBT', **_kw)
+                            self._bg_delta_lines.append(ln_d2)
+                            self._bg_color_map['DeltaBT'] = self._hover_color_to_hex(self.backgrounddeltabtcolor)
+                            self._bg_hover_cache['roast_ror_bt'] = (self.timeB, numpy.array(self.delta2B))
                 for vl in self.l_roest_vlines:
                     try:
                         vl.remove()
@@ -11391,7 +12213,7 @@ class tgraphcanvas(QObject):
                         import pathlib
                         _log_dir = pathlib.Path(_get_roast_debug_dir())
                         _log_dir.mkdir(parents=True, exist_ok=True)
-                        _snapshot_path = _log_dir / 'roast_like_render.png'
+                        _snapshot_path = pathlib.Path(_roast_debug_artifact_path('roast_like_render', '.png'))
                         self.fig.canvas.draw()
                         self.fig.savefig(str(_snapshot_path),
                                         dpi=getattr(self, 'dpi', 100),
@@ -11522,7 +12344,7 @@ class tgraphcanvas(QObject):
                         if self.roast_layout_like:
                             # Roast-like layout: ax (temps/RoR) on top, ax_events, ax_controls, ax_phases below.
                             # Give most space to the main chart (top); ensure it is never collapsed.
-                            gs = GridSpec(4, 1, height_ratios=[10, 0.5, 2.5, 0.7], hspace=0.02,
+                            gs = GridSpec(4, 1, height_ratios=[10, 0.5, 2.0, 0.7], hspace=0.01,
                                           left=0.067, right=0.925, top=0.93, bottom=0.08)
                             self.ax = self.fig.add_subplot(gs[0], facecolor=self.palette['background'])
                             # B) ax_events must be transparent so it doesn't hide anything
@@ -11662,21 +12484,17 @@ class tgraphcanvas(QObject):
                             warnings.simplefilter('ignore')
                             self.ax_controls.clear()
                         self.ax_controls.set_facecolor(self.palette['background'])
-                        self.ax_controls.set_ylim(0, 100)
+                        self.ax_controls.set_ylim(-10, 110)
                         self.ax_controls.set_ylabel(QApplication.translate('Label', '% / RPM'), color=self.palette['ylabel'], fontsize='small')
                         self.ax_controls.tick_params(axis='x', labelbottom=False)
                         self.ax_controls.yaxis.tick_left()
                         self.ax_controls.yaxis.set_label_position('left')
-                        # Roest-like grid: major every 10, minor every 5
-                        self.ax_controls.yaxis.set_major_locator(ticker.MultipleLocator(10))
-                        self.ax_controls.yaxis.set_minor_locator(ticker.MultipleLocator(5))
+                        self.ax_controls.set_yticks([0, 25, 50, 75, 100])
+                        self.ax_controls.yaxis.set_minor_locator(ticker.NullLocator())
                         self.ax_controls.grid(True, which='major', axis='y',
                                             color=self.palette.get('grid', '#888'),
                                             linestyle=self.gridstyles[self.gridlinestyle],
                                             linewidth=self.gridthickness, alpha=self.gridalpha)
-                        self.ax_controls.grid(True, which='minor', axis='y',
-                                            color=self.palette.get('grid', '#888'),
-                                            linestyle=':', linewidth=max(0.5, self.gridthickness * 0.6), alpha=self.gridalpha * 0.7)
                     if self.ax_phases is not None:
                         with warnings.catch_warnings():
                             warnings.simplefilter('ignore')
@@ -11687,7 +12505,7 @@ class tgraphcanvas(QObject):
                         self.ax_phases.set_ylim(0, 1)
                         self.ax_phases.set_yticks([])
                         self.ax_phases.tick_params(axis='y', which='both', left=False, labelleft=False)
-                        self.ax_phases.tick_params(axis='x', which='both', labelbottom=True)  # Show x-axis time labels only on phases bar (bottom)
+                        self.ax_phases.tick_params(axis='x', which='both', labelbottom=False)
                         # NOTE: _draw_phases_bar() moved to AFTER xaxistosm() — see below
 
                     prop = self.aw.mpl_fontproperties.copy()
@@ -11748,15 +12566,15 @@ class tgraphcanvas(QObject):
                     two_ax_mode = self.twoAxisMode()
 
                     tick_dir = 'in' if self.flagon else 'inout'
-                    # In roast_layout_like mode, only ax_phases shows x-axis time labels
-                    show_roast_time_labels = not self.roast_layout_like
+                    # In roast_layout_like mode, x-axis time labels are on roast (ax), not on phases bar
+                    show_roast_time_labels = self.roast_layout_like
                     self.ax.tick_params(\
                         axis='x',           # changes apply to the x-axis
                         which='both',       # both major and minor ticks are affected
                         bottom=True,        # ticks along the bottom edge are on
                         top=False,          # ticks along the top edge are off
                         direction=tick_dir,
-                        labelbottom=show_roast_time_labels)   # Hide time labels when phases axis shows them
+                        labelbottom=show_roast_time_labels)   # Show time labels under roast when roast_layout_like
                     self.ax.tick_params(\
                         axis='y',           # changes apply to the y-axis
                         which='both',       # both major and minor ticks are affected
@@ -12033,6 +12851,16 @@ class tgraphcanvas(QObject):
 
                     #check BACKGROUND flag
                     if self.background and self.backgroundprofile is not None:
+                        self._bg_hover_cache.clear()
+                        # So bubble BG_ rows get colors in classic mode too
+                        self._bg_color_map['ET'] = self._hover_color_to_hex(self.backgroundmetcolor)
+                        self._bg_color_map['BT'] = self._hover_color_to_hex(self.backgroundbtcolor)
+                        self._bg_color_map['XT'] = self._hover_color_to_hex(self.backgroundxtcolor)
+                        self._bg_color_map['YT'] = self._hover_color_to_hex(self.backgroundytcolor)
+                        self._bg_color_map['DeltaET'] = self._hover_color_to_hex(self.backgrounddeltaetcolor)
+                        self._bg_color_map['DeltaBT'] = self._hover_color_to_hex(self.backgrounddeltabtcolor)
+                        for _ei in range(4):
+                            self._bg_color_map[self.etypesf(_ei)] = self._hover_color_to_hex(self.EvalueColor[_ei])
                         if re_smooth_background:
                             # re-smooth background curves
                             tb = self.timeB
@@ -12107,8 +12935,9 @@ class tgraphcanvas(QObject):
                                 stemp3B = numpy.ma.masked_where(stemp3B == -1, stemp3B)
                                 self.l_back3, = self.ax.plot(self.extratimexB[n3], stemp3B, markersize=self.XTbackmarkersize,marker=self.XTbackmarker,
                                                             sketch_params=None,path_effects=[],transform=trans,
-                                                            linewidth=self.XTbacklinewidth,linestyle=self.XTbacklinestyle,drawstyle=self.XTbackdrawstyle,color=self.backgroundxtcolor,
-                                                            alpha=self.backgroundalpha,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundXT')))
+                                                            linewidth=self.XTbacklinewidth,linestyle=(0, (4, 2)),drawstyle=self.XTbackdrawstyle,color=self.backgroundxtcolor,
+                                                            alpha=0.55,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundXT')))
+                                self._bg_hover_cache['extra_0'] = (self.extratimexB[n3], stemp3B)
                         if self.ytcurveidx > 0:
                             idx4 = self.ytcurveidx - 1
                             n4 = idx4 // 2
@@ -12164,8 +12993,9 @@ class tgraphcanvas(QObject):
                                 stemp4B = numpy.ma.masked_where(stemp4B == -1, stemp4B)
                                 self.l_back4, = self.ax.plot(self.extratimexB[n4], stemp4B, markersize=self.YTbackmarkersize,marker=self.YTbackmarker,
                                                             sketch_params=None,path_effects=[],transform=trans,
-                                                            linewidth=self.YTbacklinewidth,linestyle=self.YTbacklinestyle,drawstyle=self.YTbackdrawstyle,color=self.backgroundytcolor,
-                                                            alpha=self.backgroundalpha,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundYT')))
+                                                            linewidth=self.YTbacklinewidth,linestyle=(0, (4, 2)),drawstyle=self.YTbackdrawstyle,color=self.backgroundytcolor,
+                                                            alpha=0.55,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundYT')))
+                                self._bg_hover_cache['extra_1'] = (self.extratimexB[n4], stemp4B)
 
 
                         #draw background
@@ -12198,8 +13028,9 @@ class tgraphcanvas(QObject):
                         temp_etb = numpy.ma.masked_where(temp_etb == -1, temp_etb)
                         self.l_back1, = self.ax.plot(self.timeB,temp_etb,markersize=self.ETbackmarkersize,marker=self.ETbackmarker,
                                                     sketch_params=None,path_effects=[],
-                                                    linewidth=self.ETbacklinewidth,linestyle=self.ETbacklinestyle,drawstyle=self.ETbackdrawstyle,color=self.backgroundmetcolor,
-                                                    alpha=self.backgroundalpha,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundET')))
+                                                    linewidth=self.ETbacklinewidth,linestyle=(0, (4, 2)),drawstyle=self.ETbackdrawstyle,color=self.backgroundmetcolor,
+                                                    alpha=0.55,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundET')))
+                        self._bg_hover_cache['roast_et'] = (self.timeB, temp_etb)
                         if self.backgroundBTcurve:
                             if self.flagon:
                                 # during recording we draw the unsmoothed background curves, with drops interpolated
@@ -12228,10 +13059,10 @@ class tgraphcanvas(QObject):
                         # don't draw -1:
                         temp_btb = numpy.ma.masked_where(temp_btb == -1, temp_btb)
                         self.l_back2, = self.ax.plot(self.timeB, temp_btb,markersize=self.BTbackmarkersize,marker=self.BTbackmarker,
-                                                    linewidth=self.BTbacklinewidth,linestyle=self.BTbacklinestyle,drawstyle=self.BTbackdrawstyle,color=self.backgroundbtcolor,
+                                                    linewidth=self.BTbacklinewidth,linestyle=(0, (4, 2)),drawstyle=self.BTbackdrawstyle,color=self.backgroundbtcolor,
                                                     sketch_params=None,path_effects=[],
-                                                    alpha=self.backgroundalpha,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundBT')))
-
+                                                    alpha=0.55,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundBT')))
+                        self._bg_hover_cache['roast_bt'] = (self.timeB, temp_btb)
                         self.smoothETBTBkgnd(recomputeAllDeltas,decay_smoothing_p)
 
                         #populate background delta ET (self.delta1B) and delta BT (self.delta2B)
@@ -12252,11 +13083,12 @@ class tgraphcanvas(QObject):
                                     sketch_params=None,path_effects=[],
                                     marker=self.ETBdeltamarker,
                                     linewidth=self.ETBdeltalinewidth,
-                                    linestyle=self.ETBdeltalinestyle,
+                                    linestyle=(0, (4, 2)),
                                     drawstyle=self.ETBdeltadrawstyle,
                                     color=self.backgrounddeltaetcolor,
-                                    alpha=self.backgroundalpha,
+                                    alpha=0.55,
                                     label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundDeltaET')))
+                                self._bg_hover_cache['roast_ror_et'] = (self.timeB, numpy.array(self.delta1B))
                             if self.DeltaBTBflag and len(self.timeB) == len(self.delta2B):
                                 try:
                                     if self.l_delta2B is not None:
@@ -12271,11 +13103,12 @@ class tgraphcanvas(QObject):
                                     sketch_params=None,path_effects=[],
                                     marker=self.BTBdeltamarker,
                                     linewidth=self.BTBdeltalinewidth,
-                                    linestyle=self.BTBdeltalinestyle,
+                                    linestyle=(0, (4, 2)),
                                     drawstyle=self.BTBdeltadrawstyle,
                                     color=self.backgrounddeltabtcolor,
-                                    alpha=self.backgroundalpha,
+                                    alpha=0.55,
                                     label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundDeltaBT')))
+                                self._bg_hover_cache['roast_ror_bt'] = (self.timeB, numpy.array(self.delta2B))
                         #check backgroundevents flag
                         if self.backgroundeventsflag and (self.backgroundETcurve or self.backgroundBTcurve):
                             height = 50 if self.mode == 'F' else 20
@@ -12520,9 +13353,11 @@ class tgraphcanvas(QObject):
                                                                                 picker=True,
                                                                                 pickradius=4,
                                                                                 #markevery=every,
-                                                                                linestyle='-',
+                                                                                linestyle=(0, (4, 2)),
                                                                                 drawstyle=(self.drawstyle_default if self.specialeventplaybackramp[0] else 'steps-post'),
-                                                                                linewidth = self.Evaluelinethickness[0],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(0,True), clip_on=True)
+                                                                                linewidth = self.Evaluelinethickness[0],alpha = 0.55, label=self.Betypesf(0,True), clip_on=True)
+                                    self._bg_E1_timex = list(E1xB)
+                                    self._bg_E1_values = list(E1yB_plot)
                                 if len(self.E2backgroundtimex)>0 and len(self.E2backgroundtimex)==len(self.E2backgroundvalues):
                                     if (self.timeindexB[6] > 0 and self.extendevents and self.timeB[self.timeindexB[6]] > self.timeB[self.backgroundEvents[E2b_last]]):   #if drop exists and last event was earlier
                                         # repeat last value at time of DROP
@@ -12552,9 +13387,11 @@ class tgraphcanvas(QObject):
                                                                                 picker=True,
                                                                                 pickradius=4,
                                                                                 #markevery=every,
-                                                                                linestyle='-',
+                                                                                linestyle=(0, (4, 2)),
                                                                                 drawstyle=(self.drawstyle_default if self.specialeventplaybackramp[1] else 'steps-post'),
-                                                                                linewidth = self.Evaluelinethickness[1],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(1,True), clip_on=True)
+                                                                                linewidth = self.Evaluelinethickness[1],alpha = 0.55, label=self.Betypesf(1,True), clip_on=True)
+                                    self._bg_E2_timex = list(E2xB)
+                                    self._bg_E2_values = list(E2yB_plot)
                                 if len(self.E3backgroundtimex)>0 and len(self.E3backgroundtimex)==len(self.E3backgroundvalues):
                                     if (self.timeindexB[6] > 0 and self.extendevents and self.timeB[self.timeindexB[6]] > self.timeB[self.backgroundEvents[E3b_last]]):   #if drop exists and last event was earlier
                                         # repeat last value at time of DROP
@@ -12584,9 +13421,11 @@ class tgraphcanvas(QObject):
                                                                                 picker=True,
                                                                                 pickradius=4,
                                                                                 #markevery=every,
-                                                                                linestyle='-',
+                                                                                linestyle=(0, (4, 2)),
                                                                                 drawstyle=(self.drawstyle_default if self.specialeventplaybackramp[2] else 'steps-post'),
-                                                                                linewidth = self.Evaluelinethickness[2],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(2,True), clip_on=True)
+                                                                                linewidth = self.Evaluelinethickness[2],alpha = 0.55, label=self.Betypesf(2,True), clip_on=True)
+                                    self._bg_E3_timex = list(E3xB)
+                                    self._bg_E3_values = list(E3yB_plot)
                                 if len(self.E4backgroundtimex)>0 and len(self.E4backgroundtimex)==len(self.E4backgroundvalues):
                                     if (self.timeindexB[6] > 0 and self.extendevents and self.timeB[self.timeindexB[6]] > self.timeB[self.backgroundEvents[E4b_last]]):   #if drop exists and last event was earlier
                                         # repeat last value at time of DROP
@@ -12616,9 +13455,11 @@ class tgraphcanvas(QObject):
                                                                                 picker=True,
                                                                                 pickradius=4,
                                                                                 #markevery=every,
-                                                                                linestyle='-',
+                                                                                linestyle=(0, (4, 2)),
                                                                                 drawstyle=(self.drawstyle_default if self.specialeventplaybackramp[3] else 'steps-post'),
-                                                                                linewidth = self.Evaluelinethickness[3],alpha = min(self.backgroundalpha + 0.1, 1.0), label=self.Betypesf(3,True), clip_on=True)
+                                                                                linewidth = self.Evaluelinethickness[3],alpha = 0.55, label=self.Betypesf(3,True), clip_on=True)
+                                    self._bg_E4_timex = list(E4xB)
+                                    self._bg_E4_values = list(E4yB_plot)
 
                             if len(self.backgroundEvents) > 0:
                                 Bevalues:list[list[float]] = [[],[],[],[]]
@@ -21037,12 +21878,12 @@ class tgraphcanvas(QObject):
 
                     self.ax.plot(btime,b1temp,markersize=self.ETbackmarkersize,marker=self.ETbackmarker,
                                                     sketch_params=None,path_effects=[],
-                                                    linewidth=self.ETbacklinewidth,linestyle=self.ETbacklinestyle,drawstyle=self.ETbackdrawstyle,color=self.backgroundmetcolor,
-                                                    alpha=self.backgroundalpha,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundET')))
+                                                    linewidth=self.ETbacklinewidth,linestyle=(0, (4, 2)),drawstyle=self.ETbackdrawstyle,color=self.backgroundmetcolor,
+                                                    alpha=0.55,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundET')))
                     self.ax.plot(btime,b2temp,markersize=self.BTbackmarkersize,marker=self.BTbackmarker,
-                                                    linewidth=self.BTbacklinewidth,linestyle=self.BTbacklinestyle,drawstyle=self.BTbackdrawstyle,color=self.backgroundbtcolor,
+                                                    linewidth=self.BTbacklinewidth,linestyle=(0, (4, 2)),drawstyle=self.BTbackdrawstyle,color=self.backgroundbtcolor,
                                                     sketch_params=None,path_effects=[],
-                                                    alpha=self.backgroundalpha,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundBT')))
+                                                    alpha=0.55,label=self.aw.arabicReshape(QApplication.translate('Label', 'BackgroundBT')))
 
                 self.l_stat1, = self.ax.plot([],[],color = self.palette['rect1'],alpha=.5,linewidth=5)
                 self.l_stat2, = self.ax.plot([],[],color = self.palette['rect2'],alpha=.5,linewidth=5)

@@ -27973,9 +27973,11 @@ def initialize_locale(my_app:Artisan) -> str:
 
 def main() -> None:
 
-
     # suppress all Qt messages
     qInstallMessageHandler(qt_message_handler)
+
+    # ensure app quits when last window is closed (avoids macOS "reopen" leaving process running)
+    app.setQuitOnLastWindowClosed(True)
 
     # suppress all warnings
     warnings.filterwarnings('ignore')
@@ -27993,6 +27995,9 @@ def main() -> None:
     _log.info('locale: %s',locale_str)
 
     appWindow = ApplicationWindow(locale=locale_str, WebEngineSupport=QtWebEngineSupport, artisanviewerFirstStart=artisanviewerFirstStart)
+    # On macOS, closing the window can hide it instead of destroying it; WA_DeleteOnClose ensures
+    # the window is destroyed on close so quitOnLastWindowClosed takes effect and the app exits.
+    appWindow.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
     app.setActivationWindow(appWindow,activateOnMessage=False) # set the activation window for the QtSingleApplication
 
@@ -28148,6 +28153,9 @@ def main() -> None:
         # ret = app.exec()
         # app = None
         # sys.exit()
+    # Ensure process exits immediately after event loop; avoids macOS or other
+    # code from keeping the process alive or triggering a relaunch.
+    sys.exit(0)
 
 # the following seems to create issue on Mac and Windows builds on exit
 #    del aw
