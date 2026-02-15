@@ -761,7 +761,7 @@ class tgraphcanvas(QObject):
                         'rect1':'#e5e5e5','rect2':'#b2b2b2','rect3':'#e5e5e5','rect4':'#bde0ee','rect5':'#d3d3d3',
                         'et':'#cc0f50','bt':'#0a5c90','xt':'#404040','yt':'#404040','deltaet':'#cc0f50',
                         'deltabt':'#0a5c90','markers':'#000000','text':'#000000','watermarks':'#ffff00','timeguide':'#0a5c90',
-                        'canvas':'#f8f8f8','legendbg':'#ffffff','legendborder':'#a9a9a9','hoverbubble':'#2d2d2df2',
+                        'canvas':'#f8f8f8','legendbg':'#ffffff','legendborder':'#a9a9a9','hoverbubble':'#2d2d2df2','hoverbubble_time':'#e8e8e8',
                         'specialeventbox':'#ff5871','specialeventtext':'#ffffff',
                         'bgeventmarker':'#7f7f7f','bgeventtext':'#000000',
                         'mettext':'#ffffff','metbox':'#cc0f50',
@@ -5118,7 +5118,7 @@ class tgraphcanvas(QObject):
                     self._hover_line_map[lbl] = line
 
         time_text = f"Time: {stringfromseconds(t_sec)}"
-        time_color = '#e8e8e8'
+        time_color = self.palette.get('hoverbubble_time', '#e8e8e8')
 
         # 1) Build active_map: raw_key -> (text, color) for metrics that have a value at t_sec
         active_map: dict[str, tuple[str, str]] = {}
@@ -16480,6 +16480,7 @@ class tgraphcanvas(QObject):
 #                self.palette["legendbgalpha"] = str(dialog.legendbgalphaButton.text())
                 self.palette['legendborder'] = str(dialog.legendborderButton.text())
                 self.palette['hoverbubble'] = str(dialog.hoverbubbleButton.text())
+                self.palette['hoverbubble_time'] = str(dialog.hoverbubbleTimeButton.text())
                 self.palette['specialeventbox'] = str(dialog.specialeventboxButton.text())
                 self.palette['specialeventtext'] = str(dialog.specialeventtextButton.text())
                 self.palette['bgeventmarker'] = str(dialog.bgeventmarkerButton.text())

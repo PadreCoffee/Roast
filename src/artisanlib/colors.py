@@ -234,6 +234,11 @@ class graphColorDlg(ArtisanDialog):
         self.hoverbubbleButton = self.colorButton(self.aw.qmc.palette.get('hoverbubble', '#2d2d2df2'))
         self.hoverbubbleButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.hoverbubbleButton.clicked.connect(self.setColorSlot)
+        self.hoverbubbleTimeLabel = QLabel(QApplication.translate('Button','Hover bubble Time'))
+        self.hoverbubbleTimeLabel.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.hoverbubbleTimeButton = self.colorButton(self.aw.qmc.palette.get('hoverbubble_time', '#e8e8e8'))
+        self.hoverbubbleTimeButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.hoverbubbleTimeButton.clicked.connect(self.setColorSlot)
         self.canvasLabel = QLabel(QApplication.translate('Button','Canvas'))
         self.canvasLabel.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.canvasButton = self.colorButton(self.aw.qmc.palette['canvas'])
@@ -444,12 +449,14 @@ class graphColorDlg(ArtisanDialog):
         grid.addWidget(self.legendborderLabel,9,0)
         grid.addWidget(self.hoverbubbleButton,10,1)
         grid.addWidget(self.hoverbubbleLabel,10,0)
-        grid.addWidget(self.watermarksButton,11,1)
-        grid.addWidget(self.watermarksLabel,11,0)
-        grid.addWidget(self.aucguideButton,12,1)
-        grid.addWidget(self.aucguideLabel,12,0)
-        grid.addWidget(self.aucareaButton,13,1)
-        grid.addWidget(self.aucareaLabel,13,0)
+        grid.addWidget(self.hoverbubbleTimeButton,11,1)
+        grid.addWidget(self.hoverbubbleTimeLabel,11,0)
+        grid.addWidget(self.watermarksButton,12,1)
+        grid.addWidget(self.watermarksLabel,12,0)
+        grid.addWidget(self.aucguideButton,13,1)
+        grid.addWidget(self.aucguideLabel,13,0)
+        grid.addWidget(self.aucareaButton,14,1)
+        grid.addWidget(self.aucareaLabel,14,0)
         grid.addWidget(self.rect1Button,0,3)
         grid.addWidget(self.rect1Label,0,2)
         grid.addWidget(self.rect2Button,1,3)
@@ -737,6 +744,7 @@ class graphColorDlg(ArtisanDialog):
                 (self.legendbgButton,'legendbg'),
                 (self.legendborderButton,'legendborder'),
                 (self.hoverbubbleButton,'hoverbubble'),
+                (self.hoverbubbleTimeButton,'hoverbubble_time'),
                 (self.specialeventboxButton,'specialeventbox'),
                 (self.specialeventtextButton,'specialeventtext'),
                 (self.bgeventmarkerButton,'bgeventmarker'),
@@ -924,6 +932,8 @@ class graphColorDlg(ArtisanDialog):
             self.setColor('legendborder',self.legendborderButton,'legendborder')
         elif widget == self.hoverbubbleButton:
             self.setColor('Hover bubble',self.hoverbubbleButton,'hoverbubble')
+        elif widget == self.hoverbubbleTimeButton:
+            self.setColor('Hover bubble Time',self.hoverbubbleTimeButton,'hoverbubble_time')
         elif widget == self.canvasButton:
             self.setColor('canvas',self.canvasButton,'canvas')
         elif widget == self.specialeventboxButton:

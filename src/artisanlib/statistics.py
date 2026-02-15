@@ -637,7 +637,7 @@ class StatisticsDlg(ArtisanResizeablDialog):
         if row_id in ('control_0', 'control_1', 'control_2', 'control_3'):
             try:
                 i = int(row_id.split('_')[1])
-                return self.aw.etypesf(i)
+                return self.aw.qmc.etypesf(i)
             except (IndexError, ValueError):
                 return row_id
         if row_id in ('extra_0', 'extra_1'):
