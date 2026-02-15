@@ -1626,14 +1626,19 @@ class tgraphcanvas(QObject):
         self.roast_tooltip_show_e3:bool = True
         self.roast_tooltip_show_e4:bool = True
         # Configurable hover bubble: order and enabled flags (Statistics > Hover / Bubble).
-        # List of {"key": str, "enabled": bool}. Keys: time, roast_bt, roast_et, roast_ror, extra_devices, controls.
+        # List of {"id": str, "enabled": bool}. row_id: time, roast_bt, roast_et, roast_ror_et, roast_ror_bt, extra_0, extra_1, control_0..3, and *_bg variants.
         self.hover_bubble_config: list[dict[str, Any]] = [
-            {'key': 'time', 'enabled': True},
-            {'key': 'roast_bt', 'enabled': True},
-            {'key': 'roast_et', 'enabled': True},
-            {'key': 'roast_ror', 'enabled': True},
-            {'key': 'extra_devices', 'enabled': True},
-            {'key': 'controls', 'enabled': True},
+            {'id': 'time', 'enabled': True},
+            {'id': 'roast_bt', 'enabled': True}, {'id': 'roast_bt_bg', 'enabled': True},
+            {'id': 'roast_et', 'enabled': True}, {'id': 'roast_et_bg', 'enabled': True},
+            {'id': 'roast_ror_et', 'enabled': True}, {'id': 'roast_ror_et_bg', 'enabled': True},
+            {'id': 'roast_ror_bt', 'enabled': True}, {'id': 'roast_ror_bt_bg', 'enabled': True},
+            {'id': 'extra_0', 'enabled': True}, {'id': 'extra_0_bg', 'enabled': True},
+            {'id': 'extra_1', 'enabled': True}, {'id': 'extra_1_bg', 'enabled': True},
+            {'id': 'control_0', 'enabled': True}, {'id': 'control_0_bg', 'enabled': True},
+            {'id': 'control_1', 'enabled': True}, {'id': 'control_1_bg', 'enabled': True},
+            {'id': 'control_2', 'enabled': True}, {'id': 'control_2_bg', 'enabled': True},
+            {'id': 'control_3', 'enabled': True}, {'id': 'control_3_bg', 'enabled': True},
         ]
 
         #legend location
@@ -5208,23 +5213,37 @@ class tgraphcanvas(QObject):
         line_specs = expanded
         raw_keys_before_filter = [r[0] for r in expanded]
 
-        # Apply config: order and filter
+        # value_lookup: row_id -> (text, color); raw_key in line_specs is already row_id (time, roast_bt, roast_bt_bg, ...)
+        value_lookup: dict[str, tuple[str, str]] = {raw_key: (text, color) for raw_key, text, color in line_specs}
+
+        # Apply config: order and filter by row_id (id or legacy key)
         config = getattr(self, 'hover_bubble_config', None) or []
-        config_by_key = {entry['key']: entry.get('enabled', True) for entry in config if isinstance(entry, dict) and entry.get('key')}
-        # Default order if no/invalid config
-        default_order = ['time', 'roast_bt', 'roast_et', 'roast_ror', 'extra_devices', 'controls']
-        order = [e['key'] for e in config if isinstance(e, dict) and e.get('key')] or default_order
+        DEFAULT_HOVER_BUBBLE_ROW_ORDER: list[str] = [
+            'time',
+            'roast_bt', 'roast_bt_bg', 'roast_et', 'roast_et_bg',
+            'roast_ror_et', 'roast_ror_et_bg', 'roast_ror_bt', 'roast_ror_bt_bg',
+            'extra_0', 'extra_0_bg', 'extra_1', 'extra_1_bg',
+            'control_0', 'control_0_bg', 'control_1', 'control_1_bg',
+            'control_2', 'control_2_bg', 'control_3', 'control_3_bg',
+        ]
+        order_entries: list[dict[str, Any]] = [e for e in config if isinstance(e, dict) and (e.get('id') or e.get('key'))]
+        if not order_entries:
+            order_entries = [{'id': rid, 'enabled': True} for rid in DEFAULT_HOVER_BUBBLE_ROW_ORDER]
+        elif all(not e.get('id') for e in order_entries):
+            # Old format (key-only groups): use default row order so bubble shows all rows
+            order_entries = [{'id': rid, 'enabled': True} for rid in DEFAULT_HOVER_BUBBLE_ROW_ORDER]
         result: list[tuple[str, str]] = []
         result_raw_keys: list[str] = []
-        for config_key in order:
-            if not config_by_key.get(config_key, True):
+        for entry in order_entries:
+            row_id = entry.get('id') or entry.get('key')
+            if not row_id or not entry.get('enabled', True):
                 continue
-            for raw_key, text, color in line_specs:
-                if self._hover_bubble_raw_key_to_config_key(raw_key) == config_key:
-                    result.append((text, color))
-                    result_raw_keys.append(raw_key)
-        if len(result) == 0 and line_specs:
-            result = [(time_text, time_color)]
+            if row_id in value_lookup:
+                text, color = value_lookup[row_id]
+                result.append((text, color))
+                result_raw_keys.append(row_id)
+        if len(result) == 0 and 'time' in value_lookup:
+            result = [(value_lookup['time'][0], value_lookup['time'][1])]
             result_raw_keys = ['time']
         if len(result) == 0:
             result = [(stringfromseconds(t_sec), time_color)]
