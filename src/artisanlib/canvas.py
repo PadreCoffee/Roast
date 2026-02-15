@@ -738,7 +738,7 @@ class tgraphcanvas(QObject):
         '_roast_hover_line', '_roast_hover_anno', '_roast_hover_last_update',
         '_roast_hover_line_controls', '_roast_hover_line_phases',
         '_roast_hover_texts', '_roast_hover_bg', '_roast_hover_markers',
-        '_roast_hover_debug_count',
+        '_roast_hover_debug_count', '_roast_hover_pinned',
         '_phases_bar_rects', '_phases_bar_texts', 'ax_phases_background'
         ]
 
@@ -1696,6 +1696,7 @@ class tgraphcanvas(QObject):
         self._roast_hover_line_phases:Line2D|None = None
         self._roast_hover_last_update:float = 0.0
         self._roast_hover_debug_count:int = 0  # for ROAST_DEBUG: log every ~50 hover events
+        self._roast_hover_pinned:bool = False  # during recording: bubble pinned to timeline, not cursor
         self._roast_debug_motion_logged:bool = False  # ROAST_DEBUG: log motion_notify_event callbacks once
         self._roast_run_id: str = _ROAST_RUN_ID  # session id for this run (same as module-level _ROAST_RUN_ID)
         self._roast_hover_texts:list[Any] = []  # Text artists for colored tooltip lines (legacy fixed HUD)
@@ -5085,6 +5086,85 @@ class tgraphcanvas(QObject):
             return None
         return None
 
+    def _next_bg_control_changes(self, t_sec: float, max_sec: float = 15) -> list[tuple[float, int, str]]:
+        """Next BG control step events in (0, max_sec] from t_sec. Returns at most 3 items sorted by dt: (dt, val_pct, label)."""
+        out: list[tuple[float, int, str]] = []
+        for ci in range(4):
+            tx = getattr(self, f'_bg_E{ci+1}_timex', None)
+            vals = getattr(self, f'_bg_E{ci+1}_values', None)
+            if tx is None or vals is None or len(tx) == 0:
+                continue
+            # first index i where tx[i] > t_sec
+            i = bisect.bisect_right(tx, t_sec)
+            if i >= len(tx):
+                continue
+            dt = tx[i] - t_sec
+            if dt <= 0 or dt > max_sec:
+                continue
+            try:
+                val = float(vals[i])
+                pct = max(0, min(100, int(round(val))))
+            except (TypeError, ValueError):  # pylint: disable=broad-except
+                continue
+            # optional: skip if next value equals current at t_sec
+            cur = self.bg_step_value(tx, vals, t_sec)
+            if cur is not None and len(vals) > 0:
+                try:
+                    cur_pct = max(0, min(100, int(round(float(cur)))))
+                    if cur_pct == pct:
+                        continue
+                except (TypeError, ValueError):  # pylint: disable=broad-except
+                    pass
+            label = self.etypesf(ci)
+            out.append((dt, pct, label or f'E{ci+1}'))
+        out.sort(key=lambda x: x[0])
+        return out[:3]
+
+    def build_pinned_bubble_lines(self, t_sec: float) -> list[tuple[str, str]]:
+        """Lines for pinned bubble during recording: Time, live controls 0..3, BG controls 0..3, reminders (next 15s)."""
+        lines: list[tuple[str, str]] = []
+        time_color = self.palette.get('hoverbubble_time', '#e8e8e8')
+        lines.append((f"Time: {stringfromseconds(t_sec)}", time_color))
+
+        # Live controls (Air/Drum/Burner/Power) — same as in hover
+        if self.ax_controls is not None:
+            control_lines = [
+                (self.l_eventtype1dots, 0), (self.l_eventtype2dots, 1), (self.l_eventtype3dots, 2), (self.l_eventtype4dots, 3),
+            ]
+            for line, ci in control_lines:
+                if line is None or not line.get_visible():
+                    continue
+                y_val = self._control_line_value_at(line, t_sec)
+                if y_val is None or (isinstance(y_val, float) and (math.isnan(y_val) or y_val < -1e6 or y_val > 1e6)):
+                    continue
+                pct = max(0, min(100, int(round(float(y_val)))))
+                lbl = self.etypesf(ci) or f'E{ci+1}'
+                try:
+                    color = self._hover_color_to_hex(line.get_color() if hasattr(line, 'get_color') else self.palette.get('text', '#333'))
+                except Exception:  # pylint: disable=broad-except
+                    color = '#e8e8e8'
+                lines.append((f"{lbl} {pct}%", color))
+
+        # BG controls at t_sec (clamp t_bg to timeB)
+        t_bg = t_sec
+        if self.background and self.backgroundprofile is not None and len(self.timeB) > 0:
+            t_bg = max(self.timeB[0], min(self.timeB[-1], t_sec))
+        include_bg = bool(self.background and self.backgroundprofile is not None and len(self.timeB) > 0)
+        if include_bg:
+            for ci in range(4):
+                if not self.bg_enabled_for_raw_key(f'control_{ci}'):
+                    continue
+                bg = self._bg_value_at(f'control_{ci}', t_bg)
+                if bg is not None:
+                    suffix, bg_color = bg
+                    lines.append((f"BG_{suffix}", bg_color))
+
+        # Reminders: next BG control changes within 15s
+        for dt, pct, label in self._next_bg_control_changes(t_sec, max_sec=15):
+            lines.append((f"In {int(round(dt))}s: {label} {pct}%", self.palette.get('text', '#888888')))
+
+        return lines
+
     def build_hover_bubble_lines(self, t_sec:float) -> list[tuple[str, str]]:
         """Build ordered list of (text, color) for the hover bubble from config and current data.
         Uses canonical row order; active and BG rows are paired (e.g. Drum then BG_Drum). BG-only mode
@@ -5280,8 +5360,11 @@ class tgraphcanvas(QObject):
             self._roast_hover_line_controls.set_data([t_sec, t_sec], [yc[0], yc[1]])
             self._roast_hover_line_controls.set_visible(True)
 
-        # Build tooltip lines via configurable build_hover_bubble_lines (order + enabled from hover_bubble_config)
-        parts_with_colors = self.build_hover_bubble_lines(t_sec)
+        # Build tooltip lines: pinned (recording) uses build_pinned_bubble_lines; normal uses build_hover_bubble_lines
+        if event is None and self._roast_hover_pinned and self.flagstart:
+            parts_with_colors = self.build_pinned_bubble_lines(t_sec)
+        else:
+            parts_with_colors = self.build_hover_bubble_lines(t_sec)
 
         # Markers: (key, ax, x, y, color) for controls; (key, target_ax, x, y, color, trans) for roast/delta
         marker_points: list[tuple[str, Any, float, float, str]] = []
@@ -5404,6 +5487,14 @@ class tgraphcanvas(QObject):
                 y_cursor = (ylim[0] + ylim[1]) / 2.0
             except Exception:  # pylint: disable=broad-except
                 pass
+        # Pinned bubble: stable position lower so Time line does not touch top
+        if self._roast_hover_pinned and self.flagstart and self.ax is not None and y_cursor is not None:
+            try:
+                y0, y1 = self.ax.get_ylim()
+                y_cursor = y1 - 0.14 * (y1 - y0)
+                y_cursor = min(y1 - 0.05 * (y1 - y0), max(y0 + 0.05 * (y1 - y0), y_cursor))
+            except Exception:  # pylint: disable=broad-except
+                pass
         # ROAST_DEBUG: every hover update to see why bubble might not draw
         if _ROAST_DEBUG_ENABLED:
             try:
@@ -5458,6 +5549,26 @@ class tgraphcanvas(QObject):
                 except Exception as _bubble_err:  # pylint: disable=broad-except
                     _hover_diag_log('bubble_set_visible_exception', {'error': str(_bubble_err), 'type': type(_bubble_err).__name__}, hypothesis_id='H6', location='canvas.py:_roast_hover_update')
                     # do not hide bubble; show with old content
+            # Pinned: slightly more transparent bubble (do not change palette globally)
+            s = self.palette.get('hoverbubble', '#2d2d2df2')
+            if len(s) == 9 and s.startswith('#'):
+                base_a = int(s[7:9], 16) / 255.0
+            else:
+                base_a = 1.0
+            if self._roast_hover_pinned and self.flagstart:
+                a_use = max(0.55, min(base_a, base_a * 0.80))
+            else:
+                a_use = base_a
+            if self._roast_hover_bbox is not None:
+                patch = getattr(self._roast_hover_bbox, 'patch', None)
+                if patch is not None:
+                    patch.set_alpha(a_use)
+            if self._roast_hover_bg is not None:
+                self._roast_hover_bg.set_alpha(a_use)
+            if self._roast_hover_anno is not None:
+                anno_patch = self._roast_hover_anno.get_bbox_patch()
+                if anno_patch is not None:
+                    anno_patch.set_alpha(a_use)
             # Always update position and show bubble
             try:
                 self._roast_hover_bbox.xy = (t_sec, y_cursor)
@@ -5840,8 +5951,12 @@ class tgraphcanvas(QObject):
                                 'reason': 'not_in_roast_axes',
                                 'inaxes_id': id(event.inaxes) if event.inaxes is not None else None,
                             })
-                        self._roast_hover_hide()
+                        if not self._roast_hover_pinned:
+                            self._roast_hover_hide()
                         self.fig.canvas.draw_idle()
+                        return
+                    # During recording: bubble is pinned to timeline, do not update from mouse
+                    if self._roast_hover_pinned:
                         return
                     # Resolve t_sec: use xdata when available, else invert (event.x, event.y) via ax that contains
                     t_sec = event.xdata
@@ -6512,6 +6627,18 @@ class tgraphcanvas(QObject):
                 self.l_timeline.set_xdata([self.timeclock.elapsedMilli()] if self.aw.sample_loop_running else [self.aw.time_stopped])
                 self.l_timeline.set_visible(self.flagstart)
                 self.ax.draw_artist(self.l_timeline)
+            # Pinned hover bubble during recording (roast-like): update from timeline time, not mouse
+            if self.flagstart and self._roast_hover_pinned and self.roast_layout_like and self.ax is not None:
+                t_sec = self.timeclock.elapsedMilli() if self.aw.sample_loop_running else self.aw.time_stopped
+                try:
+                    self._roast_hover_update(t_sec, event=None)
+                    if _ROAST_DEBUG_ENABLED:
+                        has_bg = bool(self.background and self.backgroundprofile is not None and len(self.timeB) > 0)
+                        reminders_count = len(self._next_bg_control_changes(t_sec, max_sec=15))
+                        _roast_debug_log_json({'event': 'pinned_bubble_update', 't_sec': t_sec, 'has_bg': has_bg, 'reminders_count': reminders_count})
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                self.fig.canvas.draw_idle()
             # Phases bar: update without full redraw() — only x/width/text/visible of persistent artists, then draw_idle
             if self.ax_phases is not None and self._phases_bar_rects is not None:
                 self._update_phases_bar()
@@ -17919,6 +18046,7 @@ class tgraphcanvas(QObject):
             self.resetTimer() #reset time, otherwise the recorded timestamps append to the time on START after ON!
 
             self.flagstart = True
+            self._roast_hover_pinned = True
 
             self.timealign(redraw=True)
 
@@ -18015,6 +18143,8 @@ class tgraphcanvas(QObject):
             self.aw.enableSaveActions()
             self.aw.resetCurveVisibilities()
             self.flagstart = False
+            self._roast_hover_pinned = False
+            self._roast_hover_hide()
             if self.aw.simulator:
                 self.aw.buttonSTARTSTOP.setStyleSheet(self.aw.pushbuttonstyles_simulator['STOP'])
             else:
@@ -18941,11 +19071,15 @@ class tgraphcanvas(QObject):
                                 self.timeindex[6] = max(0,len(self.timex)-1)
                             if self.aw.pidcontrol.pidOffDROP and self.aw.pidcontrol.pidActive: # Arduino/TC4, Hottop, MODBUS
                                 self.aw.pidcontrol.pidOff()
+                            self._roast_hover_pinned = False
+                            self._roast_hover_hide()
                         else:
                             tx,et,bt = self.aw.ser.NONE()
                             if et != -1 and bt != -1:
                                 self.drawmanual(et,bt,tx)
                                 self.timeindex[6] = max(0,len(self.timex)-1)
+                                self._roast_hover_pinned = False
+                                self._roast_hover_hide()
                             else:
                                 return
                         if self.BTcurve or self.ETcurve:
