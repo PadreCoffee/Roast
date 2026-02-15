@@ -4706,6 +4706,21 @@ class tgraphcanvas(QObject):
             return False
         return False
 
+    def _bg_extra_display_name(self, slot: int) -> str | None:
+        """Display name for background extra device in hover bubble. slot 0 -> xtcurveidx, slot 1 -> ytcurveidx."""
+        curveidx = self.xtcurveidx if slot == 0 else self.ytcurveidx
+        if curveidx <= 0:
+            return None
+        n = (curveidx - 1) // 2
+        use_group1 = (curveidx % 2 == 1)
+        names = self.extraname1B if use_group1 else self.extraname2B
+        if names and 0 <= n < len(names) and names[n]:
+            return self.device_name_subst(names[n])
+        names2 = self.extraname1 if use_group1 else self.extraname2
+        if names2 and 0 <= n < len(names2) and names2[n]:
+            return self.device_name_subst(names2[n])
+        return None
+
     def _pick_bg_series(self, time_arr: list[float] | Any, stemp: Any, temp: list[float] | Any) -> Any:
         """Pick series for BG interpolation: stemp if length matches time_arr, else temp as array, else None (matches draw fallback)."""
         try:
@@ -4986,9 +5001,11 @@ class tgraphcanvas(QObject):
                     t = max(tx[0], min(tx[-1], t_sec)) if len(tx) > 0 else t_sec
                     y = self.bg_interp_linear(tx, arr, t)
                     if y is not None and y > -1e6:
-                        lbl = 'XT' if extra_i == 0 else 'YT'
-                        suffix = f"{lbl} {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
-                        return (suffix, self._bg_color_map.get(lbl, '#888888'))
+                        color_key = 'XT' if extra_i == 0 else 'YT'
+                        unit = '°F' if self.mode == 'F' else '°C'
+                        name = self._bg_extra_display_name(extra_i) or color_key
+                        suffix = f"{name} {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{unit}"
+                        return (suffix, self._bg_color_map.get(color_key, '#888888'))
                     self._log_bg_value_at_none(raw_key, t_sec, 'cache used but y None or < -1e6', source='cache', y_is_none=(y is None))
                     return None
                 if extra_i == 0 and self.xtcurveidx > 0:
@@ -5016,8 +5033,11 @@ class tgraphcanvas(QObject):
                         return None
                     y = self.bg_interp_linear(tx, arr, t_ex)
                     if y is not None and y > -1e6:
-                        suffix = f"XT {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
-                        return (suffix, self._bg_color_map.get('XT', '#888888'))
+                        color_key = 'XT'
+                        unit = '°F' if self.mode == 'F' else '°C'
+                        name = self._bg_extra_display_name(0) or color_key
+                        suffix = f"{name} {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{unit}"
+                        return (suffix, self._bg_color_map.get(color_key, '#888888'))
                     self._log_bg_value_at_none(raw_key, t_sec, 'extra_0 interp y None or < -1e6', source='stemp_or_temp', tx_range=[tx[0], tx[-1]] if len(tx) >= 2 else None)
                     return None
                 if extra_i == 1 and self.ytcurveidx > 0:
@@ -5045,8 +5065,11 @@ class tgraphcanvas(QObject):
                         return None
                     y = self.bg_interp_linear(tx, arr, t_ex)
                     if y is not None and y > -1e6:
-                        suffix = f"YT {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{'°F' if self.mode == 'F' else '°C'}"
-                        return (suffix, self._bg_color_map.get('YT', '#888888'))
+                        color_key = 'YT'
+                        unit = '°F' if self.mode == 'F' else '°C'
+                        name = self._bg_extra_display_name(1) or color_key
+                        suffix = f"{name} {float2float(fromCtoF(y) if self.mode == 'F' else y, 1)}{unit}"
+                        return (suffix, self._bg_color_map.get(color_key, '#888888'))
                     self._log_bg_value_at_none(raw_key, t_sec, 'extra_1 interp y None or < -1e6', source='stemp_or_temp', tx_range=[tx[0], tx[-1]] if len(tx) >= 2 else None)
                     return None
                 self._log_bg_value_at_none(raw_key, t_sec, 'extra: xtcurveidx/ytcurveidx not >0 or no branch taken', xtcurveidx=getattr(self, 'xtcurveidx', None), ytcurveidx=getattr(self, 'ytcurveidx', None))
