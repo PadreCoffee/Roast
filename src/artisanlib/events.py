@@ -311,6 +311,20 @@ class EventsDlg(ArtisanResizeablDialog):
         self.eventslabelscharsSpinner.setToolTip(QApplication.translate('Tooltip', 'Length of text in event marks'))
         self.eventslabelscharsSpinner.setEnabled(bool(self.aw.qmc.renderEventsDescr))
 
+        self.bgReminderLeadSecondsValues: list[int] = [0, 5, 10, 15, 20, 30, 45, 60]
+        self.bgReminderLeadComboBox = QComboBox()
+        self.bgReminderLeadComboBox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.bgReminderLeadComboBox.addItems([
+            QApplication.translate('ComboBox', '0 (off)'),
+            '5 s', '10 s', '15 s', '20 s', '30 s', '45 s', '60 s',
+        ])
+        lead_sec = getattr(self.aw.qmc, 'bg_reminder_lead_seconds', 15)
+        try:
+            idx = self.bgReminderLeadSecondsValues.index(lead_sec)
+        except ValueError:  # pylint: disable=broad-except
+            idx = self.bgReminderLeadSecondsValues.index(15)
+        self.bgReminderLeadComboBox.setCurrentIndex(idx)
+        self.bgReminderLeadComboBox.setToolTip(QApplication.translate('Tooltip', 'Warn before next BG control change (pinned bubble during recording)'))
 
         if self.aw.qmc.eventsGraphflag not in [2,3,4]:
             self.eventsclampflag.setEnabled(False)
@@ -1218,6 +1232,9 @@ class EventsDlg(ArtisanResizeablDialog):
         FlagsLayout.addWidget(self.eventslabelsflag)
         FlagsLayout.addSpacing(3)
         FlagsLayout.addWidget(self.eventslabelscharsSpinner)
+        FlagsLayout.addSpacing(10)
+        FlagsLayout.addWidget(QLabel(QApplication.translate('Label', 'Warn before next BG control change')))
+        FlagsLayout.addWidget(self.bgReminderLeadComboBox)
         FlagsLayout.addStretch()
 
         AutoMarkGroupBox = QGroupBox(QApplication.translate('GroupBox','Automatic Marking'))
@@ -3692,6 +3709,7 @@ class EventsDlg(ArtisanResizeablDialog):
 
             # settings accessible in any mode:
             self.aw.qmc.eventslabelschars = self.eventslabelscharsSpinner.value()
+            self.aw.qmc.bg_reminder_lead_seconds = self.bgReminderLeadSecondsValues[self.bgReminderLeadComboBox.currentIndex()]
             # update minieditor event type ComboBox
             self.aw.etypeComboBox.clear()
             self.aw.etypeComboBox.addItems(self.aw.qmc.etypes)

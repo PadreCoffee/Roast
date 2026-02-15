@@ -660,7 +660,7 @@ class tgraphcanvas(QObject):
         'projectionmode', 'transMappingMode', 'weight', 'roasted_defects_weight', 'volume', 'density', 'roasted_defects_mode', 'density_roasted', 'volumeCalcUnit', 'volumeCalcWeightInStr',
         'volumeCalcWeightOutStr', 'container_names', 'container_weights', 'specialevents', 'etypes', 'etypesdefault',
         'alt_etypesdefault', 'default_etypes_set', 'specialeventstype',
-        'specialeventsStrings', 'specialeventsvalue', 'eventsGraphflag', 'clampEvents', 'renderEventsDescr', 'eventslabelschars', 'eventsshowflag',
+        'specialeventsStrings', 'specialeventsvalue', 'eventsGraphflag', 'clampEvents', 'renderEventsDescr', 'eventslabelschars', 'eventsshowflag', 'bg_reminder_lead_seconds',
         'annotationsflag', 'showeventsonbt', 'showEtypes', 'E1timex', 'E2timex', 'E3timex', 'E4timex', 'E1values', 'E2values', 'E3values', 'E4values',
         'EvalueColor', 'EvalueTextColor', 'EvalueMarker', 'EvalueMarkerSize', 'Evaluelinethickness', 'Evaluealpha', 'eventpositionbars', 'specialeventannotations',
         'specialeventannovisibilities', 'specialeventplaybackaid', 'specialeventplayback', 'overlappct', 'linestyle_default', 'drawstyle_default', 'linewidth_min', 'markersize_min', 'linewidth_default', 'back_linewidth_default', 'delta_linewidth_default',
@@ -2229,6 +2229,7 @@ class tgraphcanvas(QObject):
         self.clampEvents:bool = False # if True, custom events are drawn w.r.t. the temperature scale
         self.renderEventsDescr:bool = False # if True, descriptions are rendered instead of type/value tags
         self.eventslabelschars:int = 6 # maximal number of chars to render as events label
+        self.bg_reminder_lead_seconds:int = 15  # pinned bubble: warn N seconds before next BG control change; 0 = off
         #flag that shows events in the graph
         self.eventsshowflag:int = 1
         #flag that shows major event annotations in the graph
@@ -5159,9 +5160,20 @@ class tgraphcanvas(QObject):
                     suffix, bg_color = bg
                     lines.append((f"BG_{suffix}", bg_color))
 
-        # Reminders: next BG control changes within 15s
-        for dt, pct, label in self._next_bg_control_changes(t_sec, max_sec=15):
-            lines.append((f"In {int(round(dt))}s: {label} {pct}%", self.palette.get('text', '#888888')))
+        # Reminders: next BG control changes within configured lead time (0 = off)
+        if self.bg_reminder_lead_seconds > 0:
+            for dt, pct, label in self._next_bg_control_changes(t_sec, max_sec=self.bg_reminder_lead_seconds):
+                lines.append((f"In {int(round(dt))}s: {label} {pct}%", self.palette.get('text', '#888888')))
+
+        # aFCt: delta BT after FC (only when FCs is set)
+        if self.timeindex[2] > 0 and self.l_temp2 is not None and self.l_temp2.get_visible():
+            t_fc = self.timex[self.timeindex[2]]
+            bt_fc = self._line_value_at(self.l_temp2, t_fc, use_interp=True)
+            bt_now = self._line_value_at(self.l_temp2, t_sec, use_interp=True)
+            if bt_fc is not None and bt_now is not None:
+                delta = bt_now - bt_fc
+                unit = '°F' if self.mode == 'F' else '°C'
+                lines.append((f"aFCt: {delta:+.1f}{unit}", self.palette.get('hoverbubble_time', '#e8e8e8')))
 
         return lines
 
@@ -6634,7 +6646,7 @@ class tgraphcanvas(QObject):
                     self._roast_hover_update(t_sec, event=None)
                     if _ROAST_DEBUG_ENABLED:
                         has_bg = bool(self.background and self.backgroundprofile is not None and len(self.timeB) > 0)
-                        reminders_count = len(self._next_bg_control_changes(t_sec, max_sec=15))
+                        reminders_count = len(self._next_bg_control_changes(t_sec, max_sec=self.bg_reminder_lead_seconds))
                         _roast_debug_log_json({'event': 'pinned_bubble_update', 't_sec': t_sec, 'has_bg': has_bg, 'reminders_count': reminders_count})
                 except Exception:  # pylint: disable=broad-except
                     pass

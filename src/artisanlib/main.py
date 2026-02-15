@@ -18192,6 +18192,7 @@ class ApplicationWindow(QMainWindow):
             self.qmc.clampEvents = toBool(settings.value('clampEvents',self.qmc.clampEvents))
             self.qmc.renderEventsDescr = toBool(settings.value('renderEventsDescr',self.qmc.renderEventsDescr))
             self.qmc.eventslabelschars = toInt(settings.value('eventslabelschars',int(self.qmc.eventslabelschars)))
+            self.qmc.bg_reminder_lead_seconds = toInt(settings.value('bgReminderLeadSeconds', getattr(self.qmc, 'bg_reminder_lead_seconds', 15)))
             self.qmc.annotationsflag = toInt(settings.value('annotationsflag',int(self.qmc.annotationsflag)))
             self.qmc.showeventsonbt = toBool(settings.value('showeventsonbt',self.qmc.showeventsonbt))
             self.qmc.showEtypes = [toBool(x) for x in toList(settings.value('showEtypes',self.qmc.showEtypes))]
@@ -20299,6 +20300,7 @@ class ApplicationWindow(QMainWindow):
             self.settingsSetValue(settings, default_settings, 'clampEvents',self.qmc.clampEvents, read_defaults)
             self.settingsSetValue(settings, default_settings, 'renderEventsDescr',self.qmc.renderEventsDescr, read_defaults)
             self.settingsSetValue(settings, default_settings, 'eventslabelschars',self.qmc.eventslabelschars, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'bgReminderLeadSeconds', getattr(self.qmc, 'bg_reminder_lead_seconds', 15), read_defaults)
             self.settingsSetValue(settings, default_settings, 'annotationsflag',self.qmc.annotationsflag, read_defaults)
             self.settingsSetValue(settings, default_settings, 'showeventsonbt',self.qmc.showeventsonbt, read_defaults)
             self.settingsSetValue(settings, default_settings, 'showEtypes',self.qmc.showEtypes, read_defaults)
