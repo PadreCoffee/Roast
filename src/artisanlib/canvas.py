@@ -12146,15 +12146,8 @@ class tgraphcanvas(QObject):
                 if roest_events and self.ax is not None:
                     roest_events_sorted = sorted(roest_events, key=lambda x: (x[0], x[2]))
                     _trans_top = self.ax.get_xaxis_transform()
-                    _prev_t: float | None = None
-                    _lane = 0
-                    _y_lanes = [0.88, 0.73]
+                    y_label = 0.06  # single line below graphs, always visible
                     for t, label, _ in roest_events_sorted:
-                        if _prev_t is not None and abs(t - _prev_t) < 15:
-                            _lane = 1 - _lane
-                        else:
-                            _lane = 0
-                        _prev_t = t
                         vl = self.ax.axvline(t, color='#444444', linestyle=':', linewidth=1, alpha=0.6, zorder=50)
                         self.l_roest_vlines.append(vl)
                         if self.ax_controls is not None:
@@ -12165,27 +12158,17 @@ class tgraphcanvas(QObject):
                             _idx = min(range(len(self.timex)), key=lambda i: abs(self.timex[i] - t))
                             if self.temp2[_idx] is not None and self.temp2[_idx] > 0:
                                 bt_temp = self.temp2[_idx]
-                        _y_top = _y_lanes[_lane]
-                        label_fontprop = _safe_regular_fontproperties(size=9.0)
-                        temp_fontprop = _safe_bold_fontproperties(size=9.0)
+                        label_str = self.aw.arabicReshape(label)
                         if bt_temp is not None:
                             temp_str = f'{bt_temp:.1f}°{self.mode}'
-                            label_str = self.aw.arabicReshape(label)
-                            name_text = self.ax.text(t, _y_top, label_str, transform=_trans_top, rotation=90, va='top', ha='center',
-                                                    fontproperties=label_fontprop, color=self.palette['text'], zorder=70, clip_on=False)
-                            name_text.set_in_layout(False)
-                            self.l_roest_labels.append(name_text)
-                            _label_offset = len(label_str) * 0.014 + 0.025
-                            _y_temp = _y_top - _label_offset
-                            temp_text = self.ax.text(t, _y_temp, temp_str, transform=_trans_top, rotation=90, va='top', ha='center',
-                                                    fontproperties=temp_fontprop, color=self.palette['text'], zorder=70, clip_on=False)
-                            temp_text.set_in_layout(False)
-                            self.l_roest_labels.append(temp_text)
+                            line_text = f'{label_str}: {temp_str}'
                         else:
-                            name_text = self.ax.text(t, _y_top, self.aw.arabicReshape(label), transform=_trans_top, rotation=90, va='top', ha='center',
-                                                    fontproperties=label_fontprop, color=self.palette['text'], zorder=70, clip_on=False)
-                            name_text.set_in_layout(False)
-                            self.l_roest_labels.append(name_text)
+                            line_text = label_str
+                        fontprop = _safe_regular_fontproperties(size=9.0)
+                        name_text = self.ax.text(t, y_label, line_text, transform=_trans_top, rotation=90, va='top', ha='center',
+                                                fontproperties=fontprop, color=self.palette['text'], zorder=70, clip_on=False)
+                        name_text.set_in_layout(False)
+                        self.l_roest_labels.append(name_text)
                 self.E1timex, self.E2timex, self.E3timex, self.E4timex = [], [], [], []
                 self.E1values, self.E2values, self.E3values, self.E4values = [], [], [], []
                 E1values_pct: list[float] = []
