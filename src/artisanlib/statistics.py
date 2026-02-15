@@ -34,6 +34,54 @@ if TYPE_CHECKING:
 
 _log: Final[logging.Logger] = logging.getLogger(__name__)
 
+# All supported hover bubble row_ids (v1). Order used as default when config is empty.
+DEFAULT_HOVER_BUBBLE_ROW_ORDER: Final[list[str]] = [
+    'time',
+    'roast_bt', 'roast_bt_bg', 'roast_et', 'roast_et_bg',
+    'roast_ror_et', 'roast_ror_et_bg', 'roast_ror_bt', 'roast_ror_bt_bg',
+    'extra_0', 'extra_0_bg', 'extra_1', 'extra_1_bg',
+    'control_0', 'control_0_bg', 'control_1', 'control_1_bg',
+    'control_2', 'control_2_bg', 'control_3', 'control_3_bg',
+]
+
+
+def migrate_hover_bubble_config(cfg: list[Any]) -> list[dict[str, Any]]:
+    """Convert hover bubble config to new id-based format. Returns list of {"id", "enabled"}.
+    If entries have "id" -> filter to known ids. If entries have "key" (old groups) -> expand to row_ids."""
+    if not cfg or not isinstance(cfg, list):
+        return [{'id': rid, 'enabled': True} for rid in DEFAULT_HOVER_BUBBLE_ROW_ORDER]
+    has_id = any(isinstance(e, dict) and e.get('id') for e in cfg)
+    if has_id:
+        known = set(DEFAULT_HOVER_BUBBLE_ROW_ORDER)
+        result: list[dict[str, Any]] = []
+        for e in cfg:
+            if not isinstance(e, dict):
+                continue
+            rid = e.get('id') or e.get('key')
+            if rid and rid in known:
+                result.append({'id': rid, 'enabled': bool(e.get('enabled', True))})
+        return result if result else [{'id': rid, 'enabled': True} for rid in DEFAULT_HOVER_BUBBLE_ROW_ORDER]
+    key_expansion: dict[str, list[str]] = {
+        'time': ['time'],
+        'roast_bt': ['roast_bt', 'roast_bt_bg'],
+        'roast_et': ['roast_et', 'roast_et_bg'],
+        'roast_ror': ['roast_ror_et', 'roast_ror_et_bg', 'roast_ror_bt', 'roast_ror_bt_bg'],
+        'extra_devices': ['extra_0', 'extra_0_bg', 'extra_1', 'extra_1_bg'],
+        'controls': ['control_0', 'control_0_bg', 'control_1', 'control_1_bg', 'control_2', 'control_2_bg', 'control_3', 'control_3_bg'],
+    }
+    result = []
+    for e in cfg:
+        if not isinstance(e, dict) or not e.get('key'):
+            continue
+        key = e.get('key')
+        if key not in key_expansion:
+            continue
+        enabled = bool(e.get('enabled', True))
+        for rid in key_expansion[key]:
+            result.append({'id': rid, 'enabled': enabled})
+    return result if result else [{'id': rid, 'enabled': True} for rid in DEFAULT_HOVER_BUBBLE_ROW_ORDER]
+
+
 class StatisticsDlg(ArtisanResizeablDialog):
     def __init__(self, parent:'QWidget', aw:'ApplicationWindow', activeTab:int = 0) -> None:
         super().__init__(parent, aw)
@@ -365,16 +413,7 @@ class StatisticsDlg(ArtisanResizeablDialog):
         self.TabWidget.addTab(C2Widget,QApplication.translate('GroupBox','Stats Summary'))
         C2Widget.setContentsMargins(0, 0, 0, 0)  # left, top, right, bottom
 
-        ### tab3 - Hover / Bubble: configurable bubble lines (order + enabled)
-        self._hover_bubble_keys_order = ['time', 'roast_bt', 'roast_et', 'roast_ror', 'extra_devices', 'controls']
-        self._hover_bubble_key_labels = {
-            'time': QApplication.translate('Form Caption', 'Time'),
-            'roast_bt': QApplication.translate('CheckBox', 'BT'),
-            'roast_et': QApplication.translate('CheckBox', 'ET'),
-            'roast_ror': QApplication.translate('CheckBox', 'RoR'),
-            'extra_devices': QApplication.translate('Form Caption', 'Extra devices'),
-            'controls': QApplication.translate('Form Caption', 'Controls'),
-        }
+        ### tab3 - Hover / Bubble: configurable bubble lines by row_id (order + enabled)
         self.hover_bubble_config: list[dict[str, Any]] = self._load_hover_bubble_config()
         self.hoverBubbleTable = QTableWidget()
         self.hoverBubbleTable.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -521,12 +560,16 @@ class StatisticsDlg(ArtisanResizeablDialog):
         settings.setValue('StatisticsPosition',self.frameGeometry().topLeft())
         self.aw.StatisticsDlg_activeTab = self.TabWidget.currentIndex()
 
-        # Hover / Bubble tab: apply config to qmc
+        # Hover / Bubble tab: apply config to qmc (id + enabled only)
         for row in range(self.hoverBubbleTable.rowCount()):
             cb = self.hoverBubbleTable.cellWidget(row, 0)
             if isinstance(cb, QCheckBox) and row < len(self.hover_bubble_config):
                 self.hover_bubble_config[row]['enabled'] = cb.isChecked()
-        self.aw.qmc.hover_bubble_config = [dict(e) for e in self.hover_bubble_config]
+        self.aw.qmc.hover_bubble_config = [
+            {'id': rid, 'enabled': bool(e.get('enabled', True))}
+            for e in self.hover_bubble_config
+            if (rid := e.get('id') or e.get('key'))
+        ]
         self.aw.qmc.redraw(recomputeAllDeltas=False)
 
         self.updatetypes()
@@ -579,37 +622,51 @@ class StatisticsDlg(ArtisanResizeablDialog):
         if self.summarystatstable.cursor_navigation and vheader is not None:
             QTimer.singleShot(0, vheader.setFocus)
 
+    def _hover_bubble_row_display_name(self, row_id: str) -> str:
+        """Display name for a hover bubble row_id (for table column Line)."""
+        if row_id == 'time':
+            return QApplication.translate('Form Caption', 'Time')
+        if row_id == 'roast_bt':
+            return QApplication.translate('CheckBox', 'BT')
+        if row_id == 'roast_et':
+            return QApplication.translate('CheckBox', 'ET')
+        if row_id == 'roast_ror_et':
+            return 'RoR ET'
+        if row_id == 'roast_ror_bt':
+            return 'RoR BT'
+        if row_id in ('control_0', 'control_1', 'control_2', 'control_3'):
+            try:
+                i = int(row_id.split('_')[1])
+                return self.aw.etypesf(i)
+            except (IndexError, ValueError):
+                return row_id
+        if row_id in ('extra_0', 'extra_1'):
+            return QApplication.translate('Form Caption', 'Extra 1') if row_id == 'extra_0' else QApplication.translate('Form Caption', 'Extra 2')
+        if row_id.endswith('_bg'):
+            base = row_id[:-3]
+            return 'BG ' + self._hover_bubble_row_display_name(base)
+        return row_id
+
     def _load_hover_bubble_config(self) -> list[dict[str, Any]]:
-        """Load hover bubble config from qmc or return default (order + all enabled)."""
+        """Load hover bubble config from qmc; migrate old key-format; return list of {"id", "enabled"}."""
         raw = getattr(self.aw.qmc, 'hover_bubble_config', None)
-        if not raw or not isinstance(raw, list):
-            return [{'key': k, 'enabled': True} for k in self._hover_bubble_keys_order]
-        # Ensure all default keys exist and unknown keys are dropped
-        result: list[dict[str, Any]] = []
-        for e in raw:
-            if not isinstance(e, dict) or not e.get('key'):
-                continue
-            key = e.get('key')
-            if key not in self._hover_bubble_keys_order:
-                continue
-            result.append({'key': key, 'enabled': bool(e.get('enabled', True))})
-        for k in self._hover_bubble_keys_order:
-            if k not in {r['key'] for r in result}:
-                result.append({'key': k, 'enabled': True})
-        return result
+        migrated = migrate_hover_bubble_config(raw if isinstance(raw, list) else [])
+        if not migrated:
+            return [{'id': rid, 'enabled': True} for rid in DEFAULT_HOVER_BUBBLE_ROW_ORDER]
+        return migrated
 
     def _rebuild_hover_bubble_table(self) -> None:
-        """Fill Hover/Bubble table from self.hover_bubble_config."""
+        """Fill Hover/Bubble table from self.hover_bubble_config (by row id)."""
         self.hoverBubbleTable.setRowCount(len(self.hover_bubble_config))
         for row, entry in enumerate(self.hover_bubble_config):
-            key = entry.get('key', '')
+            row_id = entry.get('id') or entry.get('key', '')
             enabled = bool(entry.get('enabled', True))
             cb = QCheckBox()
             cb.setChecked(enabled)
             cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             cb.stateChanged.connect(self._hover_bubble_checkbox_changed)
             self.hoverBubbleTable.setCellWidget(row, 0, cb)
-            label = self._hover_bubble_key_labels.get(key, key)
+            label = self._hover_bubble_row_display_name(row_id)
             self.hoverBubbleTable.setItem(row, 1, QTableWidgetItem(label))
         vheader = self.hoverBubbleTable.verticalHeader()
         if vheader is not None:

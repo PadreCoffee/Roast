@@ -19432,11 +19432,12 @@ class ApplicationWindow(QMainWindow):
             if settings.contains('HoverBubbleConfig'):
                 try:
                     import json
+                    from artisanlib.statistics import migrate_hover_bubble_config
                     raw = settings.value('HoverBubbleConfig', None)
                     if raw and isinstance(raw, str):
                         cfg = json.loads(raw)
                         if isinstance(cfg, list) and cfg:
-                            self.qmc.hover_bubble_config = [{'key': str(e.get('key', '')), 'enabled': bool(e.get('enabled', True))} for e in cfg if isinstance(e, dict) and e.get('key')]
+                            self.qmc.hover_bubble_config = migrate_hover_bubble_config(cfg)
                 except Exception:  # pylint: disable=broad-except
                     pass
             settings.endGroup()
