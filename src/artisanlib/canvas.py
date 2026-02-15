@@ -761,7 +761,7 @@ class tgraphcanvas(QObject):
                         'rect1':'#e5e5e5','rect2':'#b2b2b2','rect3':'#e5e5e5','rect4':'#bde0ee','rect5':'#d3d3d3',
                         'et':'#cc0f50','bt':'#0a5c90','xt':'#404040','yt':'#404040','deltaet':'#cc0f50',
                         'deltabt':'#0a5c90','markers':'#000000','text':'#000000','watermarks':'#ffff00','timeguide':'#0a5c90',
-                        'canvas':'#f8f8f8','legendbg':'#ffffff','legendborder':'#a9a9a9',
+                        'canvas':'#f8f8f8','legendbg':'#ffffff','legendborder':'#a9a9a9','hoverbubble':'#2d2d2df2',
                         'specialeventbox':'#ff5871','specialeventtext':'#ffffff',
                         'bgeventmarker':'#7f7f7f','bgeventtext':'#000000',
                         'mettext':'#ffffff','metbox':'#cc0f50',
@@ -5529,6 +5529,12 @@ class tgraphcanvas(QObject):
         if not self.roast_layout_like or self.ax is None:
             return
         grid_color = self.palette.get('grid', '#888')
+        s = self.palette.get('hoverbubble', '#2d2d2df2')
+        if len(s) == 9 and s.startswith('#'):
+            rgb, a = s[:7], int(s[7:9], 16) / 255.0
+        else:
+            rgb = s[:7] if len(s) >= 7 else '#2d2d2d'
+            a = 1.0
         _z_vline = 4999
         _z_bubble = 5000
         _z_texts = 5001
@@ -5581,10 +5587,13 @@ class tgraphcanvas(QObject):
                 self._roast_hover_bg = None
         if self._roast_hover_bg is None:
             self._roast_hover_bg = patches.Rectangle((0.02, 0.5), 0.38, 0.1, transform=self.ax.transAxes,
-                                                    facecolor='#2d2d2d', alpha=0.95, edgecolor='#555', linewidth=1, zorder=_z_bubble, clip_on=False)
+                                                    facecolor=rgb, alpha=a, edgecolor='#555', linewidth=1, zorder=_z_bubble, clip_on=False)
             self.ax.add_patch(self._roast_hover_bg)
             self._roast_hover_bg.set_visible(False)
             self._roast_hover_bg.set_animated(False)
+        else:
+            self._roast_hover_bg.set_facecolor(rgb)
+            self._roast_hover_bg.set_alpha(a)
         # Rebind: anno on ax
         if self._roast_hover_anno is not None:
             ax_cur = getattr(self._roast_hover_anno, 'axes', None)
@@ -5597,10 +5606,15 @@ class tgraphcanvas(QObject):
         if self._roast_hover_anno is None:
             self._roast_hover_anno = self.ax.annotate('', xy=(0, 0), xytext=(0, 0), textcoords='data',
                                                      fontsize='small', color='#e8e8e8',
-                                                     bbox=dict(boxstyle='round,pad=0.35', facecolor='#2d2d2d', alpha=0.95, edgecolor='#555'),
+                                                     bbox=dict(boxstyle='round,pad=0.35', facecolor=rgb, alpha=a, edgecolor='#555'),
                                                      zorder=_z_bubble, clip_on=False)
             self._roast_hover_anno.set_visible(False)
             self._roast_hover_anno.set_animated(False)
+        else:
+            patch = self._roast_hover_anno.get_bbox_patch()
+            if patch is not None:
+                patch.set_facecolor(rgb)
+                patch.set_alpha(a)
         # Rebind: bbox on ax
         if self._roast_hover_bbox is not None:
             ax_cur = getattr(self._roast_hover_bbox, 'axes', None)
@@ -5619,13 +5633,18 @@ class tgraphcanvas(QObject):
             self._roast_hover_bbox = AnnotationBbox(_vpack, (0, 0), xycoords='data',
                                                    xybox=(15, 15), boxcoords='offset points',
                                                    frameon=True,
-                                                   bboxprops=dict(boxstyle='round,pad=0.35', facecolor='#2d2d2d', alpha=0.95, edgecolor='#555'),
+                                                   bboxprops=dict(boxstyle='round,pad=0.35', facecolor=rgb, alpha=a, edgecolor='#555'),
                                                    zorder=_z_bubble)
             self.ax.add_artist(self._roast_hover_bbox)
             self._roast_hover_bbox.set_visible(False)
             self._roast_hover_bbox.set_animated(False)
             self._roast_hover_bbox.set_clip_on(False)
             _hover_diag_log('hover_artist_created', {'kind': 'bubble', **_hover_diag_artist('bubble', self._roast_hover_bbox)}, hypothesis_id='H1', location='canvas.py:_roast_hover_ensure_artists')
+        else:
+            patch = getattr(self._roast_hover_bbox, 'patch', None)
+            if patch is not None:
+                patch.set_facecolor(rgb)
+                patch.set_alpha(a)
         # Rebind: vline_controls on ax_controls
         if self._roast_hover_line_controls is not None:
             ax_cur = getattr(self._roast_hover_line_controls, 'axes', None)
@@ -9659,7 +9678,7 @@ class tgraphcanvas(QObject):
         """Update only x/width/text/visible of the 3 rects and 3 texts (no new artists)."""
         segments = self._phases_bar_segments()
         total_dur = (segments[-1][1] - segments[0][0]) if segments else 0.0
-        show_labels = bool(self.phases_bar_show_labels)
+        show_labels = True
         prop_bold = _safe_bold_fontproperties(size=10.0)  # never raises
         if self._phases_bar_rects is not None and self._phases_bar_texts is not None:
             for i in range(3):
@@ -16441,6 +16460,7 @@ class tgraphcanvas(QObject):
                 self.palette['legendbg'] = str(dialog.legendbgButton.text())
 #                self.palette["legendbgalpha"] = str(dialog.legendbgalphaButton.text())
                 self.palette['legendborder'] = str(dialog.legendborderButton.text())
+                self.palette['hoverbubble'] = str(dialog.hoverbubbleButton.text())
                 self.palette['specialeventbox'] = str(dialog.specialeventboxButton.text())
                 self.palette['specialeventtext'] = str(dialog.specialeventtextButton.text())
                 self.palette['bgeventmarker'] = str(dialog.bgeventmarkerButton.text())

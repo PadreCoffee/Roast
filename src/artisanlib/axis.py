@@ -43,16 +43,6 @@ class WindowsDlg(ArtisanDialog):
         self.temp_grid_org = self.aw.qmc.temp_grid
         self.roast_layout_org = self.aw.qmc.roast_layout_like
         # event_style moved to Events dialog
-        self.phases_bar_show_labels_org = self.aw.qmc.phases_bar_show_labels
-        self.roast_tooltip_show_bt_org = getattr(self.aw.qmc, 'roast_tooltip_show_bt', True)
-        self.roast_tooltip_show_et_org = getattr(self.aw.qmc, 'roast_tooltip_show_et', True)
-        self.roast_tooltip_show_ror_et_org = getattr(self.aw.qmc, 'roast_tooltip_show_ror_et', True)
-        self.roast_tooltip_show_ror_bt_org = getattr(self.aw.qmc, 'roast_tooltip_show_ror_bt', True)
-        self.roast_tooltip_show_extra_by_index_org: dict = dict(getattr(self.aw.qmc, 'roast_tooltip_show_extra_by_index', {}))
-        self.roast_tooltip_show_e1_org = getattr(self.aw.qmc, 'roast_tooltip_show_e1', True)
-        self.roast_tooltip_show_e2_org = getattr(self.aw.qmc, 'roast_tooltip_show_e2', True)
-        self.roast_tooltip_show_e3_org = getattr(self.aw.qmc, 'roast_tooltip_show_e3', True)
-        self.roast_tooltip_show_e4_org = getattr(self.aw.qmc, 'roast_tooltip_show_e4', True)
         self.gridlinestyle_org = self.aw.qmc.gridlinestyle
         self.gridthickness_org = self.aw.qmc.gridthickness
         self.gridalpha_org = self.aw.qmc.gridalpha
@@ -258,45 +248,6 @@ class WindowsDlg(ArtisanDialog):
         self.roastLayoutCheckBox.setChecked(self.aw.qmc.roast_layout_like)
         self.roastLayoutCheckBox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         # Event style moved to Events dialog; see events.py
-        self.phasesBarShowLabelsCheckBox = QCheckBox(QApplication.translate('CheckBox', 'Phase bar labels (MM:SS %)'))
-        self.phasesBarShowLabelsCheckBox.setToolTip(QApplication.translate('Tooltip', 'Show duration and percentage in each phase segment on the phases strip'))
-        self.phasesBarShowLabelsCheckBox.setChecked(self.aw.qmc.phases_bar_show_labels)
-        self.phasesBarShowLabelsCheckBox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        # Roast-like hover tooltip: BT, ET, ET RoR, BT RoR, E1–E4, and per-extra-device (only when devices exist)
-        self.roastTooltipShowBTCheckBox = QCheckBox(QApplication.translate('CheckBox', 'BT'))
-        self.roastTooltipShowETCheckBox = QCheckBox(QApplication.translate('CheckBox', 'ET'))
-        self.roastTooltipShowRoRETCheckBox = QCheckBox(QApplication.translate('CheckBox', 'ET RoR'))
-        self.roastTooltipShowRoRBTCheckBox = QCheckBox(QApplication.translate('CheckBox', 'BT RoR'))
-        self.roastTooltipShowE1CheckBox = QCheckBox(self.aw.qmc.etypesf(0) if hasattr(self.aw.qmc, 'etypesf') else 'E1')
-        self.roastTooltipShowE2CheckBox = QCheckBox(self.aw.qmc.etypesf(1) if hasattr(self.aw.qmc, 'etypesf') else 'E2')
-        self.roastTooltipShowE3CheckBox = QCheckBox(self.aw.qmc.etypesf(2) if hasattr(self.aw.qmc, 'etypesf') else 'E3')
-        self.roastTooltipShowE4CheckBox = QCheckBox(self.aw.qmc.etypesf(3) if hasattr(self.aw.qmc, 'etypesf') else 'E4')
-        for cb in (self.roastTooltipShowBTCheckBox, self.roastTooltipShowETCheckBox, self.roastTooltipShowRoRETCheckBox,
-                   self.roastTooltipShowRoRBTCheckBox, self.roastTooltipShowE1CheckBox, self.roastTooltipShowE2CheckBox,
-                   self.roastTooltipShowE3CheckBox, self.roastTooltipShowE4CheckBox):
-            cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.roastTooltipShowBTCheckBox.setChecked(getattr(self.aw.qmc, 'roast_tooltip_show_bt', True))
-        self.roastTooltipShowETCheckBox.setChecked(getattr(self.aw.qmc, 'roast_tooltip_show_et', True))
-        self.roastTooltipShowRoRETCheckBox.setChecked(getattr(self.aw.qmc, 'roast_tooltip_show_ror_et', True))
-        self.roastTooltipShowRoRBTCheckBox.setChecked(getattr(self.aw.qmc, 'roast_tooltip_show_ror_bt', True))
-        self.roastTooltipShowE1CheckBox.setChecked(getattr(self.aw.qmc, 'roast_tooltip_show_e1', True))
-        self.roastTooltipShowE2CheckBox.setChecked(getattr(self.aw.qmc, 'roast_tooltip_show_e2', True))
-        self.roastTooltipShowE3CheckBox.setChecked(getattr(self.aw.qmc, 'roast_tooltip_show_e3', True))
-        self.roastTooltipShowE4CheckBox.setChecked(getattr(self.aw.qmc, 'roast_tooltip_show_e4', True))
-        # Extra/virtual devices from Devices tab: only show checkboxes for indices that exist
-        self.roastTooltipExtraCheckBoxes: list[tuple[int, QCheckBox]] = []
-        n_extra = max(len(getattr(self.aw.qmc, 'extratimex', []) or []),
-                      len(getattr(self.aw.qmc, 'extraname1', []) or []),
-                      len(getattr(self.aw.qmc, 'extraname2', []) or []))
-        extraname1 = getattr(self.aw.qmc, 'extraname1', []) or []
-        extraname2 = getattr(self.aw.qmc, 'extraname2', []) or []
-        extra_by_index = getattr(self.aw.qmc, 'roast_tooltip_show_extra_by_index', {})
-        for i in range(n_extra):
-            label = (extraname1[i] if i < len(extraname1) else None) or (extraname2[i] if i < len(extraname2) else None) or f"Extra {i+1}"
-            cb = QCheckBox(label)
-            cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            cb.setChecked(extra_by_index.get(i, True))
-            self.roastTooltipExtraCheckBoxes.append((i, cb))
         ygridlabel = QLabel(QApplication.translate('Label', 'Step'))
         ygridlabel.setToolTip(QApplication.translate('Tooltip', 'Distance of major tick labels'))
         self.ygridSpinBox = QSpinBox()
@@ -477,8 +428,6 @@ class WindowsDlg(ArtisanDialog):
         graphgridlayout.addWidget(gridalphalabel,2,2,Qt.AlignmentFlag.AlignRight)
         graphgridlayout.addWidget(self.gridalphaSpinBox,2,3,Qt.AlignmentFlag.AlignLeft)
         graphgridlayout.addWidget(self.roastLayoutCheckBox,3,0,1,2,Qt.AlignmentFlag.AlignLeft)
-        # Event style moved to Events dialog
-        graphgridlayout.addWidget(self.phasesBarShowLabelsCheckBox,4,0,1,2,Qt.AlignmentFlag.AlignLeft)
         xGroupLayout = QGroupBox(QApplication.translate('GroupBox','Time Axis'))
         xGroupLayout.setLayout(xlayout)
         yGroupLayout = QGroupBox(QApplication.translate('GroupBox','Temperature Axis'))
@@ -489,21 +438,6 @@ class WindowsDlg(ArtisanDialog):
         legendLayout.setLayout(legentlayout)
         GridGroupLayout = QGroupBox(QApplication.translate('GroupBox','Grid'))
         GridGroupLayout.setLayout(graphgridlayout)
-        tooltipLayout = QGridLayout()
-        tooltipLayout.addWidget(self.roastTooltipShowBTCheckBox, 0, 0, Qt.AlignmentFlag.AlignLeft)
-        tooltipLayout.addWidget(self.roastTooltipShowETCheckBox, 0, 1, Qt.AlignmentFlag.AlignLeft)
-        tooltipLayout.addWidget(self.roastTooltipShowRoRETCheckBox, 0, 2, Qt.AlignmentFlag.AlignLeft)
-        tooltipLayout.addWidget(self.roastTooltipShowRoRBTCheckBox, 0, 3, Qt.AlignmentFlag.AlignLeft)
-        tooltipLayout.addWidget(self.roastTooltipShowE1CheckBox, 1, 0, Qt.AlignmentFlag.AlignLeft)
-        tooltipLayout.addWidget(self.roastTooltipShowE2CheckBox, 1, 1, Qt.AlignmentFlag.AlignLeft)
-        tooltipLayout.addWidget(self.roastTooltipShowE3CheckBox, 1, 2, Qt.AlignmentFlag.AlignLeft)
-        tooltipLayout.addWidget(self.roastTooltipShowE4CheckBox, 1, 3, Qt.AlignmentFlag.AlignLeft)
-        for i, (_idx, cb) in enumerate(self.roastTooltipExtraCheckBoxes):
-            r, c = 2 + i // 4, i % 4
-            tooltipLayout.addWidget(cb, r, c, Qt.AlignmentFlag.AlignLeft)
-        TooltipGroupLayout = QGroupBox(QApplication.translate('GroupBox', 'Hover tooltip (Roast-like)'))
-        TooltipGroupLayout.setToolTip(QApplication.translate('Tooltip', 'Which values to show in the tooltip when the cursor is over the temperature/RoR or control areas'))
-        TooltipGroupLayout.setLayout(tooltipLayout)
         buttonLayout = QHBoxLayout()
         buttonLayout.addWidget(self.loadAxisFromProfile)
         buttonLayout.addSpacing(10)
@@ -515,7 +449,6 @@ class WindowsDlg(ArtisanDialog):
         mainLayout2 = QVBoxLayout()
         mainLayout2.addWidget(legendLayout)
         mainLayout2.addWidget(GridGroupLayout)
-        mainLayout2.addWidget(TooltipGroupLayout)
         mainLayout2.addWidget(zGroupLayout)
         mainLayout2.addStretch()
         mainHLayout = QHBoxLayout()
@@ -963,16 +896,6 @@ class WindowsDlg(ArtisanDialog):
         self.aw.qmc.autodeltaxBT = self.autodeltaxBTFlag.isChecked()
         self.aw.qmc.roast_layout_like = self.roastLayoutCheckBox.isChecked()
         # event_style is set in Events dialog
-        self.aw.qmc.phases_bar_show_labels = self.phasesBarShowLabelsCheckBox.isChecked()
-        self.aw.qmc.roast_tooltip_show_bt = self.roastTooltipShowBTCheckBox.isChecked()
-        self.aw.qmc.roast_tooltip_show_et = self.roastTooltipShowETCheckBox.isChecked()
-        self.aw.qmc.roast_tooltip_show_ror_et = self.roastTooltipShowRoRETCheckBox.isChecked()
-        self.aw.qmc.roast_tooltip_show_ror_bt = self.roastTooltipShowRoRBTCheckBox.isChecked()
-        self.aw.qmc.roast_tooltip_show_e1 = self.roastTooltipShowE1CheckBox.isChecked()
-        self.aw.qmc.roast_tooltip_show_e2 = self.roastTooltipShowE2CheckBox.isChecked()
-        self.aw.qmc.roast_tooltip_show_e3 = self.roastTooltipShowE3CheckBox.isChecked()
-        self.aw.qmc.roast_tooltip_show_e4 = self.roastTooltipShowE4CheckBox.isChecked()
-        self.aw.qmc.roast_tooltip_show_extra_by_index = {idx: cb.isChecked() for idx, cb in self.roastTooltipExtraCheckBoxes}
         if not self.aw.qmc.flagon:
             self.aw.autoAdjustAxis(background=(bool(self.aw.qmc.backgroundpath) and not len(self.aw.qmc.timex) > 3)) # align background if no foreground
         self.aw.qmc.redraw(recomputeAllDeltas=False, forceRenewAxis=True)
@@ -990,16 +913,6 @@ class WindowsDlg(ArtisanDialog):
         self.aw.qmc.temp_grid = self.temp_grid_org
         self.aw.qmc.roast_layout_like = self.roast_layout_org
         # event_style is set in Events dialog
-        self.aw.qmc.phases_bar_show_labels = self.phases_bar_show_labels_org
-        self.aw.qmc.roast_tooltip_show_bt = self.roast_tooltip_show_bt_org
-        self.aw.qmc.roast_tooltip_show_et = self.roast_tooltip_show_et_org
-        self.aw.qmc.roast_tooltip_show_ror_et = self.roast_tooltip_show_ror_et_org
-        self.aw.qmc.roast_tooltip_show_ror_bt = self.roast_tooltip_show_ror_bt_org
-        self.aw.qmc.roast_tooltip_show_extra_by_index = dict(self.roast_tooltip_show_extra_by_index_org)
-        self.aw.qmc.roast_tooltip_show_e1 = self.roast_tooltip_show_e1_org
-        self.aw.qmc.roast_tooltip_show_e2 = self.roast_tooltip_show_e2_org
-        self.aw.qmc.roast_tooltip_show_e3 = self.roast_tooltip_show_e3_org
-        self.aw.qmc.roast_tooltip_show_e4 = self.roast_tooltip_show_e4_org
         self.aw.qmc.gridlinestyle = self.gridlinestyle_org
         self.aw.qmc.gridthickness = self.gridthickness_org
         self.aw.qmc.gridalpha = self.gridalpha_org
@@ -1055,16 +968,6 @@ class WindowsDlg(ArtisanDialog):
         self.gridalphaSpinBox.setValue(2)
         self.timeGridCheckBox.setChecked(False)
         self.tempGridCheckBox.setChecked(False)
-        self.roastTooltipShowBTCheckBox.setChecked(True)
-        self.roastTooltipShowETCheckBox.setChecked(True)
-        self.roastTooltipShowRoRETCheckBox.setChecked(True)
-        self.roastTooltipShowRoRBTCheckBox.setChecked(True)
-        self.roastTooltipShowE1CheckBox.setChecked(True)
-        self.roastTooltipShowE2CheckBox.setChecked(True)
-        self.roastTooltipShowE3CheckBox.setChecked(True)
-        self.roastTooltipShowE4CheckBox.setChecked(True)
-        for _idx, cb in self.roastTooltipExtraCheckBoxes:
-            cb.setChecked(True)
         if len(self.aw.qmc.timex) > 1:
             self.xlimitEdit.setText(stringfromseconds(self.aw.qmc.timex[-1], leadingzero=False))
         else:

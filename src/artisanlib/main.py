@@ -18850,21 +18850,6 @@ class ApplicationWindow(QMainWindow):
             self.qmc.event_style = toString(settings.value('eventStyle', getattr(self.qmc, 'event_style', 'classic')))
             if self.qmc.event_style not in ('classic', 'roest'):
                 self.qmc.event_style = 'classic'
-            self.qmc.phases_bar_show_labels = toBool(settings.value('phasesBarShowLabels',self.qmc.phases_bar_show_labels))
-            self.qmc.roast_tooltip_show_bt = toBool(settings.value('roastTooltipShowBt', getattr(self.qmc, 'roast_tooltip_show_bt', True)))
-            self.qmc.roast_tooltip_show_et = toBool(settings.value('roastTooltipShowEt', getattr(self.qmc, 'roast_tooltip_show_et', True)))
-            self.qmc.roast_tooltip_show_ror_et = toBool(settings.value('roastTooltipShowRorEt', getattr(self.qmc, 'roast_tooltip_show_ror_et', True)))
-            self.qmc.roast_tooltip_show_ror_bt = toBool(settings.value('roastTooltipShowRorBt', getattr(self.qmc, 'roast_tooltip_show_ror_bt', True)))
-            for i in range(20):
-                key = f'roastTooltipExtra{i}'
-                if settings.contains(key):
-                    if not hasattr(self.qmc, 'roast_tooltip_show_extra_by_index') or not isinstance(getattr(self.qmc, 'roast_tooltip_show_extra_by_index', None), dict):
-                        self.qmc.roast_tooltip_show_extra_by_index = {}
-                    self.qmc.roast_tooltip_show_extra_by_index[i] = toBool(settings.value(key, True))
-            self.qmc.roast_tooltip_show_e1 = toBool(settings.value('roastTooltipShowE1', getattr(self.qmc, 'roast_tooltip_show_e1', True)))
-            self.qmc.roast_tooltip_show_e2 = toBool(settings.value('roastTooltipShowE2', getattr(self.qmc, 'roast_tooltip_show_e2', True)))
-            self.qmc.roast_tooltip_show_e3 = toBool(settings.value('roastTooltipShowE3', getattr(self.qmc, 'roast_tooltip_show_e3', True)))
-            self.qmc.roast_tooltip_show_e4 = toBool(settings.value('roastTooltipShowE4', getattr(self.qmc, 'roast_tooltip_show_e4', True)))
             settings.endGroup()
 #--- END GROUP Axis
 
@@ -20730,18 +20715,6 @@ class ApplicationWindow(QMainWindow):
             self.settingsSetValue(settings, default_settings, 'time_grid',self.qmc.time_grid, read_defaults)
             self.settingsSetValue(settings, default_settings, 'roastLayout',self.qmc.roast_layout_like, read_defaults)
             self.settingsSetValue(settings, default_settings, 'eventStyle', getattr(self.qmc, 'event_style', 'classic'), read_defaults)
-            self.settingsSetValue(settings, default_settings, 'phasesBarShowLabels',self.qmc.phases_bar_show_labels, read_defaults)
-            self.settingsSetValue(settings, default_settings, 'roastTooltipShowBt', self.qmc.roast_tooltip_show_bt, read_defaults)
-            self.settingsSetValue(settings, default_settings, 'roastTooltipShowEt', self.qmc.roast_tooltip_show_et, read_defaults)
-            self.settingsSetValue(settings, default_settings, 'roastTooltipShowRorEt', self.qmc.roast_tooltip_show_ror_et, read_defaults)
-            self.settingsSetValue(settings, default_settings, 'roastTooltipShowRorBt', self.qmc.roast_tooltip_show_ror_bt, read_defaults)
-            extra_by_index = getattr(self.qmc, 'roast_tooltip_show_extra_by_index', {}) or {}
-            for i in range(20):
-                self.settingsSetValue(settings, default_settings, f'roastTooltipExtra{i}', extra_by_index.get(i, True), read_defaults)
-            self.settingsSetValue(settings, default_settings, 'roastTooltipShowE1', self.qmc.roast_tooltip_show_e1, read_defaults)
-            self.settingsSetValue(settings, default_settings, 'roastTooltipShowE2', self.qmc.roast_tooltip_show_e2, read_defaults)
-            self.settingsSetValue(settings, default_settings, 'roastTooltipShowE3', self.qmc.roast_tooltip_show_e3, read_defaults)
-            self.settingsSetValue(settings, default_settings, 'roastTooltipShowE4', self.qmc.roast_tooltip_show_e4, read_defaults)
             settings.endGroup()
 #--- END GROUP Axis
 
