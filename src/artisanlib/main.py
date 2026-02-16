@@ -111,7 +111,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QMessageBox, QLabel, QMainWi
                          QLCDNumber, QSpinBox, QComboBox,
                          QSlider,
                          QColorDialog, QFrame, QScrollArea, QProgressDialog,
-                         QStyleFactory, QMenuBar, QMenu, QLayout, QDockWidget)
+                         QStyleFactory, QMenuBar, QMenu, QLayout, QDockWidget, QSplitter)
 from PyQt6.QtGui import (QScreen, QPageLayout, QAction, QImageReader, QWindow,
                             QKeySequence, QShortcut,
                             QPixmap,QColor,QDesktopServices,QIcon,
@@ -1465,7 +1465,7 @@ class ApplicationWindow(QMainWindow):
         'lcdpaletteB', 'lcdpaletteF', 'extraeventsbuttonsflags', 'extraeventslabels', 'extraeventbuttoncolor', 'extraeventsactionstrings',
         'extraeventbuttonround', 'block_quantification_sampling_ticks', 'sampling_seconds_to_block_quantifiction', 'sampling_ticks_to_block_quantifiction', 'extraeventsactionslastvalue',
         'org_extradevicesettings', 'eventslidervalues', 'eventslidervisibilities', 'eventsliderKeyboardControl', 'eventsliderAlternativeLayout_default',
-        'eventsliderAlternativeLayout', 'eventslideractions', 'eventslidercommands', 'eventslideroffsets',
+        'eventsliderAlternativeLayout', 'eventsliderDockPosition', 'eventsliderContainerMode', 'eventslideractions', 'eventslidercommands', 'eventslideroffsets',
         'eventsliderfactors', 'eventslidermin', 'eventsMaxValue', 'eventslidermax', 'eventslidersflags', 'eventsliderBernoulli', 'eventslidercoarse',
         'eventslidertemp', 'eventsliderunits', 'eventslidermoved', 'SVslidermoved', 'eventquantifieractive', 'eventquantifiersource', 'eventquantifierSV',
         'eventquantifiermin', 'eventquantifiermax', 'eventquantifiercoarse', 'eventquantifieraction', 'clusterEventsFlag', 'eventquantifierlinspaces',
@@ -1507,7 +1507,7 @@ class ApplicationWindow(QMainWindow):
         'DRYlabel', 'DRYlcd', 'DRYlcdFrame', 'DRY2FCslabel', 'DRY2FCsframe', 'FCslabel', 'FCslcd', 'FCslcdFrame', 'AUClabel', 'AUClcd', 'AUClcdFrame',
         'AUCLCD', 'phasesLCDs', 'extrabuttonsLayout', 'extrabuttondialogs', 'slider1', 'slider2', 'slider3', 'slider4', 'sliderLCD1', 'sliderLCD2', 'sliderLCD3',
         'sliderLCD4', 'sliderGrpBox1', 'sliderGrpBox2', 'sliderGrpBox3', 'sliderGrpBox4', 'sliderSV', 'sliderLCDSV', 'sliderGrpBoxSV', 'leftlayout',
-        'sliderFrame', 'sliderDock', 'lcdFrame', 'midlayout', 'editgraphdialog', 'html_loader', 'QtWebEngineSupport', 'artisanviewerFirstStart',
+        'sliderFrame', 'sliderDock', 'eventsBottomLeftContainer', 'eventsBottomHSplitter', 'lcdFrame', 'midlayout', 'editgraphdialog', 'html_loader', 'QtWebEngineSupport', 'artisanviewerFirstStart',
         'buttonpalette', 'extraeventbuttontextcolor', 'extraeventsactions', 'extraeventsdescriptions', 'extraeventstypes', 'extraeventsvalues',
         'extraeventsvisibility', 'fileSaveAsAction', 'keyboardButtonStyles', 'language_menu_actions', 'loadThemeAction', 'main_button_min_width_str',
         'minieventleft', 'minieventright', 'notificationManager', 'notificationsflag', 'ntb', 'pdf_page_layout', 'pdf_rendering', 'productionPDFAction',
@@ -1928,7 +1928,8 @@ class ApplicationWindow(QMainWindow):
         self.eventsliderKeyboardControl:bool = True # if false sliders cannot be moved using up/down keys
         self.eventsliderAlternativeLayout_default:Final[bool] = False # if True group slider 1+4 and 2+3 instead of slider 1+2 and 3+4
         self.eventsliderAlternativeLayout:bool = self.eventsliderAlternativeLayout_default
-        self.eventsliderDockPosition:str = 'left'  # 'left'|'bottom'
+        self.eventsliderDockPosition:str = 'left'  # 'left'|'bottom' (legacy, migrated to eventsliderContainerMode)
+        self.eventsliderContainerMode:str = 'dock_left'  # 'dock_left'|'dock_bottom'|'embedded'
         self.eventslideractions:list[int] = [0]*self.eventsliders # 0: None, 1: Serial Command, 2: Modbus Command, 3: DTA Command, 4: Call Program, 5: Hottop Heater, 6: Hottop Fan
         self.eventslidercommands:list[str] = ['']*self.eventsliders
         self.eventslideroffsets:list[float] = [0.0]*self.eventsliders
@@ -3995,13 +3996,23 @@ class ApplicationWindow(QMainWindow):
         self.extrabuttondialogs.setLayout(self.extrabuttonsLayout)
         self.extrabuttondialogs.setVisible(False)
 
+        # Bottom panel under graphs: splitter with left slot for embedded sliders and right for extra buttons
+        self.eventsBottomLeftContainer = QFrame()
+        self.eventsBottomLeftContainer.setLayout(QVBoxLayout())
+        self.eventsBottomLeftContainer.layout().setContentsMargins(0, 0, 0, 0)
+        self.eventsBottomLeftContainer.setVisible(False)
+        self.eventsBottomLeftContainer.setMaximumWidth(0)
+        self.eventsBottomHSplitter = QSplitter(Qt.Orientation.Horizontal)
+        self.eventsBottomHSplitter.addWidget(self.eventsBottomLeftContainer)
+        self.eventsBottomHSplitter.addWidget(self.extrabuttondialogs)
+
         midleftlayout = QVBoxLayout()
         midleftlayout.setSpacing(0)
         midleftlayout.setContentsMargins(0,0,0,0)
         midleftlayout.addWidget(self.messagelabel)
         midleftlayout.addLayout(level3layout)
         midleftlayout.addWidget(self.lowerbuttondialog)
-        midleftlayout.addWidget(self.extrabuttondialogs)
+        midleftlayout.addWidget(self.eventsBottomHSplitter)
 
         midleftlayout.addWidget(self.EventsGroupLayout)
 
@@ -4193,6 +4204,11 @@ class ApplicationWindow(QMainWindow):
         self.sliderDock.setVisible(False)
 
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.sliderDock)
+
+        # Placeholder for dock when sliderFrame is embedded in bottom panel (avoids empty dock)
+        self._sliderDockPlaceholder = QWidget()
+        self._sliderDockPlaceholder.setMinimumSize(0, 0)
+        self._sliderDockPlaceholder.setMaximumSize(0, 0)
 
         self.lcdFrame:QFrame = QFrame()
         self.lcdFrame.setLayout(LCDlayout)
@@ -11743,7 +11759,12 @@ class ApplicationWindow(QMainWindow):
         self.slider3.setVisible(False)
         self.slider4.setVisible(False)
         self.sliderSV.setVisible(False)
-        self.sliderDock.setVisible(False)
+        if getattr(self, 'eventsliderContainerMode', 'dock_left').startswith('dock_'):
+            self.sliderDock.setVisible(False)
+        else:
+            self.sliderFrame.setVisible(False)
+            self.eventsBottomLeftContainer.setVisible(False)
+            self.eventsBottomLeftContainer.setMaximumWidth(0)
         self.slidersAction.setChecked(False)
         # remember state
         if changeDefault:
@@ -11759,7 +11780,12 @@ class ApplicationWindow(QMainWindow):
 
     def showSliders(self, changeDefault:bool = True) -> None:
         if self.slidersVisible():
-            self.sliderDock.setVisible(True)
+            if getattr(self, 'eventsliderContainerMode', 'dock_left').startswith('dock_'):
+                self.sliderDock.setVisible(True)
+            else:
+                self.eventsBottomLeftContainer.setMaximumWidth(16777215)
+                self.eventsBottomLeftContainer.setVisible(True)
+                self.sliderFrame.setVisible(True)
             focused_widget = QApplication.focusWidget()
             if focused_widget and focused_widget != self.centralWidget():
                 focused_widget.clearFocus()
@@ -11791,12 +11817,11 @@ class ApplicationWindow(QMainWindow):
                     self.eventslidersflags[0] = 1
 
     def applySliderDockPosition(self) -> None:
-        """Apply slider dock position (left or bottom). Call after restoreState when loading if eventsliderDockPosition was in settings."""
+        """Apply slider dock position (left or bottom). Kept for legacy; prefer applyEventSliderContainerMode."""
         try:
             area = (Qt.DockWidgetArea.BottomDockWidgetArea if self.eventsliderDockPosition == 'bottom' else Qt.DockWidgetArea.LeftDockWidgetArea)
             self.removeDockWidget(self.sliderDock)
             self.addDockWidget(area, self.sliderDock)
-            # Preserve show/hide state
             if self.slidersVisible():
                 self.sliderDock.setVisible(True)
             else:
@@ -11804,10 +11829,52 @@ class ApplicationWindow(QMainWindow):
         except Exception as e: # pylint: disable=broad-except
             _log.exception(e)
 
+    def applyEventSliderContainerMode(self) -> None:
+        """Apply event slider container mode: dock_left, dock_bottom, or embedded under graphs."""
+        try:
+            mode = getattr(self, 'eventsliderContainerMode', 'dock_left')
+            left_layout = self.eventsBottomLeftContainer.layout()
+            assert left_layout is not None
+
+            if mode == 'embedded':
+                # Move sliderFrame from dock to bottom panel left slot
+                if self.sliderDock.widget() is self.sliderFrame:
+                    self.sliderDock.setWidget(self._sliderDockPlaceholder)
+                    self.sliderFrame.setParent(None)
+                    left_layout.addWidget(self.sliderFrame)
+                self.eventsBottomLeftContainer.setMaximumWidth(16777215)  # allow visible width
+                self.eventsBottomLeftContainer.setVisible(True)
+                self.sliderDock.setVisible(False)
+                if self.slidersVisible():
+                    self.sliderFrame.setVisible(True)
+                else:
+                    self.sliderFrame.setVisible(False)
+            else:
+                # Dock mode: ensure sliderFrame is in sliderDock
+                if self.sliderFrame.parent() is self.eventsBottomLeftContainer:
+                    left_layout.removeWidget(self.sliderFrame)
+                    self.sliderFrame.setParent(None)
+                    self.sliderDock.setWidget(self.sliderFrame)
+                self.eventsBottomLeftContainer.setVisible(False)
+                self.eventsBottomLeftContainer.setMaximumWidth(0)
+                area = (Qt.DockWidgetArea.BottomDockWidgetArea if mode == 'dock_bottom' else Qt.DockWidgetArea.LeftDockWidgetArea)
+                self.removeDockWidget(self.sliderDock)
+                self.addDockWidget(area, self.sliderDock)
+                self.sliderDock.setVisible(self.slidersVisible())
+        except Exception as e: # pylint: disable=broad-except
+            _log.exception(e)
+
+    def _slidersUIVisible(self) -> bool:
+        """True if the slider UI (dock or embedded frame) is currently visible."""
+        mode = getattr(self, 'eventsliderContainerMode', 'dock_left')
+        if mode.startswith('dock_'):
+            return self.sliderDock.isVisible()
+        return self.sliderFrame.isVisible()
+
     @pyqtSlot()
     @pyqtSlot(bool)
     def toggleSliders(self,_:bool = False) -> None:
-        if self.sliderDock.isVisible():
+        if self._slidersUIVisible():
             self.hideSliders()
         else:
             self.showSliders()
@@ -19196,13 +19263,21 @@ class ApplicationWindow(QMainWindow):
             if len(eventsliderunits) == self.eventsliders:
                 self.eventsliderunits = eventsliderunits
             self.qmc.mode_tempsliders = ('F' if str(settings.value('ModeTempSliders',self.qmc.mode_tempsliders)) == 'F' else 'C')
-            if settings.contains('eventsliderDockPosition'):
+            if settings.contains('eventsliderContainerMode'):
+                self.eventsliderContainerMode = str(settings.value('eventsliderContainerMode', 'dock_left'))
+                if self.eventsliderContainerMode not in ('dock_left', 'dock_bottom', 'embedded'):
+                    self.eventsliderContainerMode = 'dock_left'
+                self.eventsliderDockPosition = 'bottom' if self.eventsliderContainerMode == 'dock_bottom' else 'left'
+                self._apply_slider_container_after_restore = True
+            elif settings.contains('eventsliderDockPosition'):
                 self.eventsliderDockPosition = str(settings.value('eventsliderDockPosition', 'left'))
                 if self.eventsliderDockPosition not in ('left', 'bottom'):
                     self.eventsliderDockPosition = 'left'
-                self._apply_slider_dock_position_after_restore = True
+                self.eventsliderContainerMode = 'dock_bottom' if self.eventsliderDockPosition == 'bottom' else 'dock_left'
+                self._apply_slider_container_after_restore = True
             else:
-                self._apply_slider_dock_position_after_restore = False
+                self._apply_slider_container_after_restore = False
+            self._eventsBottomHSplitterState = settings.value('eventsBottomHSplitterState')  # QByteArray or None
             settings.endGroup()
             self.qmc.adjustTempSliders() # adjust min/max slider limits of temperature sliders to correspond to the current temp mode
 #--- END GROUP Sliders
@@ -19570,9 +19645,14 @@ class ApplicationWindow(QMainWindow):
                 #restore main window state (like dock widget positions)
                 if settings.contains('MainWindowState'):
                     self.restoreState(settings.value('MainWindowState'))
-                # Apply slider dock position after restoreState only if user had saved it (key existed)
-                if getattr(self, '_apply_slider_dock_position_after_restore', False):
-                    self.applySliderDockPosition()
+                # Apply slider container mode after restoreState when user had saved position/container (migrate legacy key)
+                if getattr(self, '_apply_slider_container_after_restore', False):
+                    self.applyEventSliderContainerMode()
+                    if getattr(self, 'eventsliderContainerMode', 'dock_left') == 'embedded' and getattr(self, '_eventsBottomHSplitterState', None):
+                        try:
+                            self.eventsBottomHSplitter.restoreState(self._eventsBottomHSplitterState)
+                        except Exception as e: # pylint: disable=broad-except
+                            _log.exception(e)
             if not filename: # only if an external settings file is loaded
                 FigureCanvas.updateGeometry(self.qmc.canvas)  #@UndefinedVariable
 
@@ -21126,7 +21206,10 @@ class ApplicationWindow(QMainWindow):
             self.settingsSetValue(settings, default_settings, 'slidervisibilities',self.eventslidervisibilities, read_defaults)
             self.settingsSetValue(settings, default_settings, 'eventsliderKeyboardControl',self.eventsliderKeyboardControl, read_defaults)
             self.settingsSetValue(settings, default_settings, 'eventsliderAlternativeLayout',self.eventsliderAlternativeLayout, read_defaults)
-            self.settingsSetValue(settings, default_settings, 'eventsliderDockPosition',self.eventsliderDockPosition, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'eventsliderContainerMode',self.eventsliderContainerMode, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'eventsliderDockPosition','bottom' if self.eventsliderContainerMode == 'dock_bottom' else 'left', read_defaults)
+            if getattr(self, 'eventsliderContainerMode', 'dock_left') == 'embedded':
+                self.settingsSetValue(settings, default_settings, 'eventsBottomHSplitterState',self.eventsBottomHSplitter.saveState(), read_defaults)
             self.settingsSetValue(settings, default_settings, 'slideractions',self.eventslideractions, read_defaults)
             self.settingsSetValue(settings, default_settings, 'slidercommands',self.eventslidercommands, read_defaults)
             self.settingsSetValue(settings, default_settings, 'slideroffsets',self.eventslideroffsets, read_defaults)
