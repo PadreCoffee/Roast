@@ -623,7 +623,7 @@ class tgraphcanvas(QObject):
         'phidget1018_changeTriggers', 'phidget1018_changeTriggersValues', 'phidget1018_changeTriggersStrings', 'phidgetVCP100x_voltageRanges', 'phidgetVCP100x_voltageRangeValues',
         'phidgetVCP100x_voltageRangeStrings', 'phidgetDAQ1400_powerSupplyStrings', 'phidgetDAQ1400_powerSupply', 'phidgetDAQ1400_inputModeStrings', 'phidgetDAQ1400_inputMode',
         'devices', 'phidgetDevices', 'nonSerialDevices', 'nonTempDevices', 'specialDevices', 'binaryDevices', 'extradevices', 'extratimex', 'extradevicecolor1', 'extradevicecolor2', 'extratemp1',
-        'extratemp2', 'extrastemp1', 'extrastemp2', 'extractimex1', 'extractimex2', 'extractemp1', 'extractemp2', 'extratemp1lines', 'extratemp2lines',
+        'extratemp2', 'extrastemp1', 'extrastemp2', 'extractimex1', 'extractimex2', 'extractemp1', 'extractemp2', 'extratemp1lines', 'extratemp2lines', 'l_extra_control_lines',
         'extraname1', 'extraname2', 'extramathexpression1', 'extramathexpression2', 'extralinestyles1', 'extralinestyles2', 'extradrawstyles1', 'extradrawstyles2',
         'extralinewidths1', 'extralinewidths2', 'extramarkers1', 'extramarkers2', 'extramarkersizes1', 'extramarkersizes2', 'devicetablecolumnwidths', 'energytablecolumnwidths', 'extraNoneTempHint1',
         'extraNoneTempHint2', 'plotcurves', 'plotcurvecolor', 'overlapList', 'tight_layout_params', 'cupping_tight_layout_params', 'fig', 'ax', 'delta_ax', 'legendloc', 'legendloc_pos', 'onclick_cid',
@@ -1563,6 +1563,7 @@ class tgraphcanvas(QObject):
         # however, the invariants len(extractimex1) = len(extractemp1) and len(extractimex2) = len(extractemp2) always hold
         self.extratemp1lines:list[Line2D] = []                      # lists with extra lines for speed drawing
         self.extratemp2lines:list[Line2D] = []
+        self.l_extra_control_lines:list[Line2D] = []                 # extra device T1/T2 lines on ax_controls (Control 1/2)
         self.extraname1:list[str] = []                              # name of labels for line (like ET or BT) - legend
         self.extraname2:list[str] = []
         self.extramathexpression1:list[str] = []                    # list with user defined math evaluating strings. Example "2*cos(x)"
@@ -12270,6 +12271,34 @@ class tgraphcanvas(QObject):
                         _ln = getattr(self, f'l_eventtype{_i+1}dots', None)
                         if _ln is not None:
                             _ln.set_gid(self.etypesf(_i))
+                    # Extra device Control 1/2 lines on ax_controls
+                    self.l_extra_control_lines = []
+                    n_extra = min(
+                        len(getattr(self.aw, 'extraControlVisibility1', []) or []),
+                        len(getattr(self.aw, 'extraControlVisibility2', []) or []),
+                        len(self.extratimex or []),
+                        len(self.extrastemp1 or []),
+                        len(self.extrastemp2 or []),
+                        len(self.extraname1 or []),
+                        len(self.extraname2 or []),
+                    )
+                    for _i in range(n_extra):
+                        if not (self.extratimex and _i < len(self.extratimex) and self.extratimex[_i] and len(self.extratimex[_i]) > 1):
+                            continue
+                        try:
+                            _tx = numpy.array(self.extratimex[_i], dtype=float)
+                            _name1 = self.extraname1[_i] if _i < len(self.extraname1) else f'C1_{_i}'
+                            _name2 = self.extraname2[_i] if _i < len(self.extraname2) else f'C2_{_i}'
+                            if self.aw.extraControlVisibility1[_i] and _i < len(self.extrastemp1) and len(self.extrastemp1[_i]) == len(_tx):
+                                _y1 = numpy.clip(numpy.array(self.extrastemp1[_i], dtype=numpy.double), 0, 100)
+                                _ln1, = self.ax_controls.plot(_tx, _y1, linestyle='--', drawstyle='steps-post', linewidth=0.75, alpha=0.85, label=f'C1 {_name1}', clip_on=True, color=self.extradevicecolor1[_i] if _i < len(self.extradevicecolor1) else '#888')
+                                self.l_extra_control_lines.append(_ln1)
+                            if self.aw.extraControlVisibility2[_i] and _i < len(self.extrastemp2) and len(self.extrastemp2[_i]) == len(_tx):
+                                _y2 = numpy.clip(numpy.array(self.extrastemp2[_i], dtype=numpy.double), 0, 100)
+                                _ln2, = self.ax_controls.plot(_tx, _y2, linestyle='--', drawstyle='steps-post', linewidth=0.75, alpha=0.85, label=f'C2 {_name2}', clip_on=True, color=self.extradevicecolor2[_i] if _i < len(self.extradevicecolor2) else '#888')
+                                self.l_extra_control_lines.append(_ln2)
+                        except Exception:  # pylint: disable=broad-except
+                            pass
                 trans = self.delta_ax.transData if self.delta_ax is not None else None
                 if trans is not None and (self.DeltaETflag or self.DeltaBTflag):
                     if (not self.flagon or self.timeindex[0] > 1) and len(self.timex) == len(self.delta1) and len(self.timex) == len(self.delta2) and len(self.timex) > charge_idx + 2:
@@ -12876,6 +12905,12 @@ class tgraphcanvas(QObject):
                                 ldots.remove()
                         except Exception: # pylint: disable=broad-except
                             pass
+                    for _l in (self.l_extra_control_lines or []):
+                        try:
+                            _l.remove()
+                        except Exception: # pylint: disable=broad-except
+                            pass
+                    self.l_extra_control_lines = []
 
                     self.l_eventtype1dots = None
                     self.l_eventtype2dots = None
@@ -14436,6 +14471,35 @@ class tgraphcanvas(QObject):
                                                                 picker=True,
                                                                 pickradius=4,#markevery=every,
                                                                 linestyle='-',drawstyle=ds,linewidth = self.Evaluelinethickness[3],alpha = self.Evaluealpha[3],label=self.etypesf(3), clip_on=True)
+                            # Extra device Control 1/2 lines on ax_controls (classic path)
+                            if _ax_ev == self.ax_controls and self.ax_controls is not None:
+                                self.l_extra_control_lines = []
+                                n_extra_cl = min(
+                                    len(getattr(self.aw, 'extraControlVisibility1', []) or []),
+                                    len(getattr(self.aw, 'extraControlVisibility2', []) or []),
+                                    len(self.extratimex or []),
+                                    len(self.extrastemp1 or []),
+                                    len(self.extrastemp2 or []),
+                                    len(self.extraname1 or []),
+                                    len(self.extraname2 or []),
+                                )
+                                for _ic in range(n_extra_cl):
+                                    if not (self.extratimex and _ic < len(self.extratimex) and self.extratimex[_ic] and len(self.extratimex[_ic]) > 1):
+                                        continue
+                                    try:
+                                        _txc = numpy.array(self.extratimex[_ic], dtype=float)
+                                        _name1c = self.extraname1[_ic] if _ic < len(self.extraname1) else f'C1_{_ic}'
+                                        _name2c = self.extraname2[_ic] if _ic < len(self.extraname2) else f'C2_{_ic}'
+                                        if self.aw.extraControlVisibility1[_ic] and _ic < len(self.extrastemp1) and len(self.extrastemp1[_ic]) == len(_txc):
+                                            _y1c = numpy.clip(numpy.array(self.extrastemp1[_ic], dtype=numpy.double), 0, 100)
+                                            _ln1c, = self.ax_controls.plot(_txc, _y1c, linestyle='--', drawstyle='steps-post', linewidth=0.75, alpha=0.85, label=f'C1 {_name1c}', clip_on=True, color=self.extradevicecolor1[_ic] if _ic < len(self.extradevicecolor1) else '#888')
+                                            self.l_extra_control_lines.append(_ln1c)
+                                        if self.aw.extraControlVisibility2[_ic] and _ic < len(self.extrastemp2) and len(self.extrastemp2[_ic]) == len(_txc):
+                                            _y2c = numpy.clip(numpy.array(self.extrastemp2[_ic], dtype=numpy.double), 0, 100)
+                                            _ln2c, = self.ax_controls.plot(_txc, _y2c, linestyle='--', drawstyle='steps-post', linewidth=0.75, alpha=0.85, label=f'C2 {_name2c}', clip_on=True, color=self.extradevicecolor2[_ic] if _ic < len(self.extradevicecolor2) else '#888')
+                                            self.l_extra_control_lines.append(_ln2c)
+                                    except Exception:  # pylint: disable=broad-except
+                                        pass
                         if Nevents:
                             evalues:list[list[float]] = [[],[],[],[]]
                             evalues_pct:list[list[float]] = [[],[],[],[]]

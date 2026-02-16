@@ -2687,7 +2687,7 @@ class DeviceAssignmentDlg(ArtisanResizeablDialog):
 
     def createDeviceTable(self) -> None:
         try:
-            columns = 15
+            columns = 17
             if self.devicetable.columnCount() == columns:
                 # rows have been already established
                 # save the current columnWidth to reset them after table creation
@@ -2712,6 +2712,8 @@ class DeviceAssignmentDlg(ArtisanResizeablDialog):
                                                         QApplication.translate('Table', 'LCD 2'),
                                                         QApplication.translate('Table', 'Curve 1'),
                                                         QApplication.translate('Table', 'Curve 2'),
+                                                        QApplication.translate('Table', 'Control 1'),
+                                                        QApplication.translate('Table', 'Control 2'),
                                                         deltaLabelUTF8 + ' ' + QApplication.translate('GroupBox','Axis') + ' 1',
                                                         deltaLabelUTF8 + ' ' + QApplication.translate('GroupBox','Axis') + ' 2',
                                                         QApplication.translate('Table', 'Fill 1'),
@@ -2728,7 +2730,7 @@ class DeviceAssignmentDlg(ArtisanResizeablDialog):
             if vheader is not None:
                 vheader.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
 
-            fixed_size_sections = [7,8,9,10,11,12,13,14]
+            fixed_size_sections = [7,8,9,10,11,12,13,14,15,16]
             if nddevices:
                 dev = self.aw.qmc.devices[:]             #deep copy
                 limit = len(dev)
@@ -2801,28 +2803,42 @@ class DeviceAssignmentDlg(ArtisanResizeablDialog):
                         else:
                             Curve2visibilityQCheckBox.setCheckState(Qt.CheckState.Unchecked)
                         Curve2visibilityQCheckBox.stateChanged.connect(self.updateCurveVisibility2)
-                        # 11: delta 1
+                        # 11: control 1
+                        Control1widget, Control1visibilityQCheckBox = self.centeredCheckBox()
+                        if i < len(self.aw.extraControlVisibility1) and self.aw.extraControlVisibility1[i]:
+                            Control1visibilityQCheckBox.setCheckState(Qt.CheckState.Checked)
+                        else:
+                            Control1visibilityQCheckBox.setCheckState(Qt.CheckState.Unchecked)
+                        Control1visibilityQCheckBox.stateChanged.connect(self.updateControlVisibility1)
+                        # 12: control 2
+                        Control2widget, Control2visibilityQCheckBox = self.centeredCheckBox()
+                        if i < len(self.aw.extraControlVisibility2) and self.aw.extraControlVisibility2[i]:
+                            Control2visibilityQCheckBox.setCheckState(Qt.CheckState.Checked)
+                        else:
+                            Control2visibilityQCheckBox.setCheckState(Qt.CheckState.Unchecked)
+                        Control2visibilityQCheckBox.stateChanged.connect(self.updateControlVisibility2)
+                        # 13: delta 1
                         Delta1widget, Delta1QCheckBox = self.centeredCheckBox()
                         if self.aw.extraDelta1[i]:
                             Delta1QCheckBox.setCheckState(Qt.CheckState.Checked)
                         else:
                             Delta1QCheckBox.setCheckState(Qt.CheckState.Unchecked)
                         Delta1QCheckBox.stateChanged.connect(self.updateDelta1)
-                        # 12: delta 2
+                        # 14: delta 2
                         Delta2widget, Delta2QCheckBox = self.centeredCheckBox()
                         if self.aw.extraDelta2[i]:
                             Delta2QCheckBox.setCheckState(Qt.CheckState.Checked)
                         else:
                             Delta2QCheckBox.setCheckState(Qt.CheckState.Unchecked)
                         Delta2QCheckBox.stateChanged.connect(self.updateDelta2)
-                        # 13: fill 1
+                        # 15: fill 1
                         Fill1SpinBox = QSpinBox()
                         Fill1SpinBox.setSingleStep(1)
                         Fill1SpinBox.setRange(0,100)
                         Fill1SpinBox.setAlignment(Qt.AlignmentFlag.AlignRight)
                         Fill1SpinBox.setValue(int(self.aw.extraFill1[i]))
                         Fill1SpinBox.editingFinished.connect(self.updateFill1)
-                        # 14: fill 2
+                        # 16: fill 2
                         Fill2SpinBox = QSpinBox()
                         Fill2SpinBox.setSingleStep(1)
                         Fill2SpinBox.setRange(0,100)
@@ -2841,10 +2857,12 @@ class DeviceAssignmentDlg(ArtisanResizeablDialog):
                         self.devicetable.setCellWidget(i,8,LCD2widget)
                         self.devicetable.setCellWidget(i,9,Curve1widget)
                         self.devicetable.setCellWidget(i,10,Curve2widget)
-                        self.devicetable.setCellWidget(i,11,Delta1widget)
-                        self.devicetable.setCellWidget(i,12,Delta2widget)
-                        self.devicetable.setCellWidget(i,13,Fill1SpinBox)
-                        self.devicetable.setCellWidget(i,14,Fill2SpinBox)
+                        self.devicetable.setCellWidget(i,11,Control1widget)
+                        self.devicetable.setCellWidget(i,12,Control2widget)
+                        self.devicetable.setCellWidget(i,13,Delta1widget)
+                        self.devicetable.setCellWidget(i,14,Delta2widget)
+                        self.devicetable.setCellWidget(i,15,Fill1SpinBox)
+                        self.devicetable.setCellWidget(i,16,Fill2SpinBox)
 
                         # we add QTableWidgetItems disable selection of cells and to have tab focus to jump over those cells
                         color1item = QTableWidgetItem()
@@ -2853,7 +2871,7 @@ class DeviceAssignmentDlg(ArtisanResizeablDialog):
                         color2item = QTableWidgetItem()
                         color2item.setFlags(Qt.ItemFlag.NoItemFlags)
                         self.devicetable.setItem(i,2,color2item)
-                        for j in range(7, 13):
+                        for j in range(7, 15):
                             item = QTableWidgetItem()
                             item.setFlags(Qt.ItemFlag.NoItemFlags)
                             self.devicetable.setItem(i,j,item)
@@ -3008,8 +3026,22 @@ class DeviceAssignmentDlg(ArtisanResizeablDialog):
                     if item0 is not None:
                         Curve2visibilityCheckBox = cast(QCheckBox, item0.widget())
                         clipboard += str(Curve2visibilityCheckBox.isChecked()) + '\t'
+                # control 1
+                Control1visibilityWidget = cast(QWidget, self.devicetable.cellWidget(r,11))
+                Control1visibilityLayout = Control1visibilityWidget.layout() if Control1visibilityWidget else None
+                if Control1visibilityLayout is not None:
+                    item0 = Control1visibilityLayout.itemAt(0)
+                    if item0 is not None and item0.widget() is not None:
+                        clipboard += str(cast(QCheckBox, item0.widget()).isChecked()) + '\t'
+                # control 2
+                Control2visibilityWidget = cast(QWidget, self.devicetable.cellWidget(r,12))
+                Control2visibilityLayout = Control2visibilityWidget.layout() if Control2visibilityWidget else None
+                if Control2visibilityLayout is not None:
+                    item0 = Control2visibilityLayout.itemAt(0)
+                    if item0 is not None and item0.widget() is not None:
+                        clipboard += str(cast(QCheckBox, item0.widget()).isChecked()) + '\t'
                 # delta 1
-                Delta1Widget = cast(QWidget, self.devicetable.cellWidget(r,11))
+                Delta1Widget = cast(QWidget, self.devicetable.cellWidget(r,13))
                 Delta1Layout = Delta1Widget.layout()
                 if Delta1Layout is not None:
                     item0 = Delta1Layout.itemAt(0)
@@ -3017,7 +3049,7 @@ class DeviceAssignmentDlg(ArtisanResizeablDialog):
                         Delta1CheckBox = cast(QCheckBox, item0.widget())
                         clipboard += str(Delta1CheckBox.isChecked()) + '\t'
                 # delta 2
-                Delta2Widget = cast(QWidget, self.devicetable.cellWidget(r,12))
+                Delta2Widget = cast(QWidget, self.devicetable.cellWidget(r,14))
                 Delta2Layout = Delta2Widget.layout()
                 if Delta2Layout is not None:
                     item0 = Delta2Layout.itemAt(0)
@@ -3025,10 +3057,10 @@ class DeviceAssignmentDlg(ArtisanResizeablDialog):
                         Delta2CheckBox = cast(QCheckBox, item0.widget())
                         clipboard += str(Delta2CheckBox.isChecked()) + '\t'
                 # fill 1
-                Fill1SpinBox = cast(QSpinBox, self.devicetable.cellWidget(r,13))
+                Fill1SpinBox = cast(QSpinBox, self.devicetable.cellWidget(r,15))
                 clipboard += str(Fill1SpinBox.value()) + '\t'
                 # fill 2
-                Fill2SpinBox = cast(QSpinBox, self.devicetable.cellWidget(r,14))
+                Fill2SpinBox = cast(QSpinBox, self.devicetable.cellWidget(r,16))
                 clipboard += str(Fill2SpinBox.value()) + '\n'
         # copy to the system clipboard
         sys_clip = QApplication.clipboard()
@@ -3157,6 +3189,10 @@ class DeviceAssignmentDlg(ArtisanResizeablDialog):
             self.aw.extraCurveVisibility1.append(True) # keep length constant (self.aw.nLCDS)
             self.aw.extraCurveVisibility2.pop(x)
             self.aw.extraCurveVisibility2.append(True) # keep length constant (self.aw.nLCDS)
+            self.aw.extraControlVisibility1.pop(x)
+            self.aw.extraControlVisibility1.append(False) # keep length constant (self.aw.nLCDS)
+            self.aw.extraControlVisibility2.pop(x)
+            self.aw.extraControlVisibility2.append(False) # keep length constant (self.aw.nLCDS)
             self.aw.extraDelta1.pop(x)
             self.aw.extraDelta1.append(False) # keep length constant (self.aw.nLCDS)
             self.aw.extraDelta2.pop(x)
@@ -3316,27 +3352,45 @@ class DeviceAssignmentDlg(ArtisanResizeablDialog):
             self.aw.qmc.resetlinecountcaches()
 
     @pyqtSlot(int)
-    def updateDelta1(self, x:int) -> None:
+    def updateControlVisibility1(self, x:int) -> None:
         r = self.aw.findWidgetsRow(self.devicetable,self.sender(),11)
+        if r is not None and r < len(self.aw.extraControlVisibility1):
+            self.aw.extraControlVisibility1[r] = bool(x)
+            self.aw.qmc.resetlinecountcaches()
+            if self.aw.qmc.redraw is not None:
+                self.aw.qmc.redraw(recomputeAllDeltas=False)
+
+    @pyqtSlot(int)
+    def updateControlVisibility2(self, x:int) -> None:
+        r = self.aw.findWidgetsRow(self.devicetable,self.sender(),12)
+        if r is not None and r < len(self.aw.extraControlVisibility2):
+            self.aw.extraControlVisibility2[r] = bool(x)
+            self.aw.qmc.resetlinecountcaches()
+            if self.aw.qmc.redraw is not None:
+                self.aw.qmc.redraw(recomputeAllDeltas=False)
+
+    @pyqtSlot(int)
+    def updateDelta1(self, x:int) -> None:
+        r = self.aw.findWidgetsRow(self.devicetable,self.sender(),13)
         if r is not None:
             self.aw.extraDelta1[r] = bool(x)
 
     @pyqtSlot(int)
     def updateDelta2(self, x:int) -> None:
-        r = self.aw.findWidgetsRow(self.devicetable,self.sender(),12)
+        r = self.aw.findWidgetsRow(self.devicetable,self.sender(),14)
         if r is not None:
             self.aw.extraDelta2[r] = bool(x)
 
     @pyqtSlot()
     def updateFill1(self) -> None:
-        r = self.aw.findWidgetsRow(self.devicetable,self.sender(),13)
+        r = self.aw.findWidgetsRow(self.devicetable,self.sender(),15)
         if r is not None:
             sender = cast(QSpinBox, self.sender())
             self.aw.extraFill1[r] = sender.value()
 
     @pyqtSlot()
     def updateFill2(self) -> None:
-        r = self.aw.findWidgetsRow(self.devicetable,self.sender(),14)
+        r = self.aw.findWidgetsRow(self.devicetable,self.sender(),16)
         if r is not None:
             sender = cast(QSpinBox, self.sender())
             self.aw.extraFill2[r] = sender.value()

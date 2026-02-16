@@ -1490,6 +1490,7 @@ class ApplicationWindow(QMainWindow):
         'buttonCOOL', 'lcd1', 'lcd2', 'lcd3', 'lcd4', 'lcd5',
         'lcd6', 'lcd7', 'label2', 'label3', 'label4', 'label5', 'label6', 'label7', 'extraLCD1', 'extraLCD2', 'extraLCDlabel1', 'extraLCDlabel2',
         'extraLCDframe1', 'extraLCDframe2', 'extraLCDvisibility1', 'extraLCDvisibility2', 'extraCurveVisibility1', 'extraCurveVisibility2',
+        'extraControlVisibility1', 'extraControlVisibility2',
         'extraDelta1', 'extraDelta2', 'extraFill1', 'extraFill2', 'channel_tare_values', 'messagehist', 'eventlabel', 'eNumberSpinBox',
         'extraDelta1b', 'extraDelta2b',
         'lineEvent', 'etypeComboBox', 'valueEdit', 'etimeline', 'buttonminiEvent', 'buttonlist', 'buttonStates', 'lastbuttonpressed', 'buttonlistmaxlen',
@@ -3435,6 +3436,8 @@ class ApplicationWindow(QMainWindow):
         self.extraLCDvisibility2: list[bool] = [False]*self.nLCDS
         self.extraCurveVisibility1: list[bool] = [True]*self.nLCDS
         self.extraCurveVisibility2: list[bool] = [True]*self.nLCDS
+        self.extraControlVisibility1: list[bool] = [False]*self.nLCDS
+        self.extraControlVisibility2: list[bool] = [False]*self.nLCDS
         self.extraDelta1: list[bool] = [False]*self.nLCDS
         self.extraDelta2: list[bool] = [False]*self.nLCDS
         self.extraDelta1b: list[bool] = [False]*self.nLCDS # background curves
@@ -14794,6 +14797,7 @@ class ApplicationWindow(QMainWindow):
             self.qmc.extramathexpression1,self.qmc.extramathexpression2 = [],[]
             self.extraLCDvisibility1,self.extraLCDvisibility2 = [False]*self.nLCDS,[False]*self.nLCDS
             self.extraCurveVisibility1,self.extraCurveVisibility2 = [True]*self.nLCDS,[True]*self.nLCDS
+            self.extraControlVisibility1,self.extraControlVisibility2 = [False]*self.nLCDS,[False]*self.nLCDS
             self.extraDelta1,self.extraDelta2 = [False]*self.nLCDS,[False]*self.nLCDS
             self.extraFill1,self.extraFill2 = [0]*self.nLCDS,[0]*self.nLCDS
             for i in range(len(self.extraLCDlabel1)):
@@ -15300,6 +15304,10 @@ class ApplicationWindow(QMainWindow):
         self.extraCurveVisibility1 = self.extraCurveVisibility1 + [True]*max(0,self.nLCDS-len(self.extraCurveVisibility1))
         self.extraCurveVisibility2 = self.extraCurveVisibility2[:self.nLCDS]
         self.extraCurveVisibility2 = self.extraCurveVisibility2 + [True]*max(0,self.nLCDS-len(self.extraCurveVisibility2))
+        self.extraControlVisibility1 = self.extraControlVisibility1[:self.nLCDS]
+        self.extraControlVisibility1 = self.extraControlVisibility1 + [False]*max(0,self.nLCDS-len(self.extraControlVisibility1))
+        self.extraControlVisibility2 = self.extraControlVisibility2[:self.nLCDS]
+        self.extraControlVisibility2 = self.extraControlVisibility2 + [False]*max(0,self.nLCDS-len(self.extraControlVisibility2))
         self.extraDelta1 = self.extraDelta1[:self.nLCDS]
         self.extraDelta1 = self.extraDelta1 + [False]*max(0,self.nLCDS-len(self.extraDelta1))
         self.extraDelta2 = self.extraDelta2[:self.nLCDS]
@@ -15323,6 +15331,8 @@ class ApplicationWindow(QMainWindow):
                 'extraLCDvisibility2'    : self.extraLCDvisibility2,
                 'extraCurveVisibility1'  : self.extraCurveVisibility1,
                 'extraCurveVisibility2'  : self.extraCurveVisibility2,
+                'extraControlVisibility1': self.extraControlVisibility1,
+                'extraControlVisibility2': self.extraControlVisibility2,
                 'extraDelta1'            : self.extraDelta1,
                 'extraDelta2'            : self.extraDelta2,
                 'extraFill1'             : self.extraFill1,
@@ -15354,6 +15364,8 @@ class ApplicationWindow(QMainWindow):
             self.extraLCDvisibility2      = self.org_extradevicesettings['extraLCDvisibility2']
             self.extraCurveVisibility1    = self.org_extradevicesettings['extraCurveVisibility1']
             self.extraCurveVisibility2    = self.org_extradevicesettings['extraCurveVisibility2']
+            self.extraControlVisibility1  = self.org_extradevicesettings.get('extraControlVisibility1', [False]*self.nLCDS)
+            self.extraControlVisibility2  = self.org_extradevicesettings.get('extraControlVisibility2', [False]*self.nLCDS)
             self.extraDelta1              = self.org_extradevicesettings['extraDelta1']
             self.extraDelta2              = self.org_extradevicesettings['extraDelta2']
             self.extraFill1               = self.org_extradevicesettings['extraFill1']
@@ -15463,6 +15475,8 @@ class ApplicationWindow(QMainWindow):
         self.settingsSetValue(settings, default_settings, 'extraLCDvisibility2',self.extraLCDvisibility2, read_defaults)
         self.settingsSetValue(settings, default_settings, 'extraCurveVisibility1',self.extraCurveVisibility1, read_defaults)
         self.settingsSetValue(settings, default_settings, 'extraCurveVisibility2',self.extraCurveVisibility2, read_defaults)
+        self.settingsSetValue(settings, default_settings, 'extraControlVisibility1',self.extraControlVisibility1, read_defaults)
+        self.settingsSetValue(settings, default_settings, 'extraControlVisibility2',self.extraControlVisibility2, read_defaults)
         self.settingsSetValue(settings, default_settings, 'extraDelta1',self.extraDelta1, read_defaults)
         self.settingsSetValue(settings, default_settings, 'extraDelta2',self.extraDelta2, read_defaults)
         self.settingsSetValue(settings, default_settings, 'extraFill1',self.extraFill1, read_defaults)
@@ -15545,6 +15559,10 @@ class ApplicationWindow(QMainWindow):
             self.extraCurveVisibility1 = [toBool(x) for x in toList(settings.value('extraCurveVisibility1',self.extraCurveVisibility1))]
         if settings.contains('extraCurveVisibility2'):
             self.extraCurveVisibility2 = [toBool(x) for x in toList(settings.value('extraCurveVisibility2',self.extraCurveVisibility2))]
+        if settings.contains('extraControlVisibility1'):
+            self.extraControlVisibility1 = [toBool(x) for x in toList(settings.value('extraControlVisibility1',self.extraControlVisibility1))]
+        if settings.contains('extraControlVisibility2'):
+            self.extraControlVisibility2 = [toBool(x) for x in toList(settings.value('extraControlVisibility2',self.extraControlVisibility2))]
         if settings.contains('extraDelta1'):
             self.extraDelta1 = [toBool(x) for x in toList(settings.value('extraDelta1',self.extraDelta1))]
         if settings.contains('extraDelta2'):
@@ -15799,6 +15817,16 @@ class ApplicationWindow(QMainWindow):
                         self.extraCurveVisibility2 = self.extraCurveVisibility2 + [True]*max(0,self.nLCDS-len(self.extraCurveVisibility2))
                     else:
                         self.extraCurveVisibility2 = [True]*self.nLCDS
+                    if 'extraControlVisibility1' in profile:
+                        self.extraControlVisibility1 = profile['extraControlVisibility1'][:self.nLCDS]
+                        self.extraControlVisibility1 = self.extraControlVisibility1 + [False]*max(0,self.nLCDS-len(self.extraControlVisibility1))
+                    else:
+                        self.extraControlVisibility1 = [False]*self.nLCDS
+                    if 'extraControlVisibility2' in profile:
+                        self.extraControlVisibility2 = profile['extraControlVisibility2'][:self.nLCDS]
+                        self.extraControlVisibility2 = self.extraControlVisibility2 + [False]*max(0,self.nLCDS-len(self.extraControlVisibility2))
+                    else:
+                        self.extraControlVisibility2 = [False]*self.nLCDS
                     if 'extraDelta1' in profile:
                         self.extraDelta1 = profile['extraDelta1'][:self.nLCDS]
                         self.extraDelta1 = self.extraDelta1 + [False]*max(0,self.nLCDS-len(self.extraDelta1))
@@ -17050,6 +17078,8 @@ class ApplicationWindow(QMainWindow):
             profile['extraLCDvisibility2']     = self.extraLCDvisibility2
             profile['extraCurveVisibility1']   = self.extraCurveVisibility1
             profile['extraCurveVisibility2']   = self.extraCurveVisibility2
+            profile['extraControlVisibility1'] = self.extraControlVisibility1
+            profile['extraControlVisibility2'] = self.extraControlVisibility2
             profile['extraDelta1']             = self.extraDelta1
             profile['extraDelta2']             = self.extraDelta2
             profile['extraFill1']              = self.extraFill1
