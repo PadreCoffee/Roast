@@ -691,6 +691,10 @@ class EventsDlg(ArtisanResizeablDialog):
         self.showExtraButtonTooltips.setToolTip(QApplication.translate('Tooltip', 'Show custom event button specification as button tooltip'))
         self.showExtraButtonTooltips.setChecked(self.aw.show_extrabutton_tooltips)
         self.showExtraButtonTooltips.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.extraeventbuttonsCompactLayoutCheckBox = QCheckBox(QApplication.translate('CheckBox','Compact buttons layout (left aligned, ignore hidden spacers)'))
+        self.extraeventbuttonsCompactLayoutCheckBox.setToolTip(QApplication.translate('Tooltip', 'Only add visible buttons to the bar; left-align rows with no gaps for hidden buttons'))
+        self.extraeventbuttonsCompactLayoutCheckBox.setChecked(getattr(self.aw, 'extraeventbuttonsCompactLayout', False))
+        self.extraeventbuttonsCompactLayoutCheckBox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         #table for showing events
         self.eventbuttontable = QTableWidget()
         self.eventbuttontable.setTabKeyNavigation(True)
@@ -1552,6 +1556,8 @@ class EventsDlg(ArtisanResizeablDialog):
         nbuttonslayout.addWidget(self.markLastButtonPressed)
         nbuttonslayout.addSpacing(10)
         nbuttonslayout.addWidget(self.showExtraButtonTooltips)
+        nbuttonslayout.addSpacing(10)
+        nbuttonslayout.addWidget(self.extraeventbuttonsCompactLayoutCheckBox)
         nbuttonslayout.addStretch()
         tab2buttonlayout = QHBoxLayout()
         tab2buttonlayout.addWidget(addButton)
@@ -3717,6 +3723,7 @@ class EventsDlg(ArtisanResizeablDialog):
                 self.aw.updateSlidersProperties() # set visibility and event names on slider widgets
                 #save special event annotations
                 self.saveAnnotationsSettings()
+                self.aw.extraeventbuttonsCompactLayout = self.extraeventbuttonsCompactLayoutCheckBox.isChecked()
                 self.savetableextraeventbutton()
 
 

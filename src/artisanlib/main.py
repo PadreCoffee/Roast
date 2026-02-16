@@ -1907,6 +1907,7 @@ class ApplicationWindow(QMainWindow):
         #   2: right rounded
         #   3: rounded on both sides
         self.extraeventbuttonround:list[int] = [] # set by realignbuttons on rendering the button rows and read by setExtraEventButtonStyle to update the style
+        self.extraeventbuttonsCompactLayout:bool = False  # if True, only visible buttons in layout, left-aligned, no invisible gaps
 
         # quantification is blocked if lock_quantification_sampling_ticks is not 0
         # (eg. after a change of the event value by button or slider actions as the machine, like a Probat might need some seconds to slowly
@@ -19404,6 +19405,8 @@ class ApplicationWindow(QMainWindow):
             settings.beginGroup('ExtraEventButtons')
             if settings.contains('extraeventsactions'):
                 self.buttonlistmaxlen = toInt(settings.value('buttonlistmaxlen',self.buttonlistmaxlen))
+                if settings.contains('extraeventbuttonsCompactLayout'):
+                    self.extraeventbuttonsCompactLayout = toBool(settings.value('extraeventbuttonsCompactLayout',self.extraeventbuttonsCompactLayout))
                 self.extraeventsbuttonsflags = [toInt(x) for x in toList(settings.value('extraeventsbuttonsflags',self.extraeventsbuttonsflags))]
                 extraeventstypes = [toInt(x) for x in toList(settings.value('extraeventstypes',self.extraeventstypes))]
                 extraeventsvalues = [toFloat(x) for x in toList(settings.value('extraeventsvalues',self.extraeventsvalues))]
@@ -21073,6 +21076,7 @@ class ApplicationWindow(QMainWindow):
             #custom event buttons
             settings.beginGroup('ExtraEventButtons')
             self.settingsSetValue(settings, default_settings, 'buttonlistmaxlen',self.buttonlistmaxlen, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'extraeventbuttonsCompactLayout',self.extraeventbuttonsCompactLayout, read_defaults)
             self.settingsSetValue(settings, default_settings, 'extraeventstypes',self.extraeventstypes, read_defaults)
             self.settingsSetValue(settings, default_settings, 'extraeventsvalues',self.extraeventsvalues, read_defaults)
             self.settingsSetValue(settings, default_settings, 'extraeventsactionstrings',self.extraeventsactionstrings, read_defaults)
@@ -26650,6 +26654,19 @@ class ApplicationWindow(QMainWindow):
         row9count = 0
         row10count = 0
 
+        row_layouts = [
+            self.e1buttonbarLayout, self.e2buttonbarLayout, self.e3buttonbarLayout, self.e4buttonbarLayout,
+            self.e5buttonbarLayout, self.e6buttonbarLayout, self.e7buttonbarLayout, self.e8buttonbarLayout,
+            self.e9buttonbarLayout, self.e10buttonbarLayout
+        ]
+        row_dialogs = [
+            self.e1buttondialog, self.e2buttondialog, self.e3buttondialog, self.e4buttondialog,
+            self.e5buttondialog, self.e6buttondialog, self.e7buttondialog, self.e8buttondialog,
+            self.e9buttondialog, self.e10buttondialog
+        ]
+        visible_count = 0
+        compact = getattr(self, 'extraeventbuttonsCompactLayout', False)
+
         # hidden buttons at the top of the table are for actions and don't count in the first row
         # find the index of the first visible button
         first_visible_idx = 0
@@ -26659,40 +26676,56 @@ class ApplicationWindow(QMainWindow):
                 break
 
         for i, eet in enumerate(self.extraeventstypes):
-            # next button in this group is hidden
-            next_hidden = ((i - first_visible_idx)%self.buttonlistmaxlen < self.buttonlistmaxlen -1 and  # at least one more places in the group
-                    i+1 < len(self.extraeventstypes) and # there is one more button
-                    not self.extraeventsvisibility[i+1]) # and the next one is hidden
-            # previous button in this group is hidden
-            prev_hidden = ((i - first_visible_idx)%self.buttonlistmaxlen > 0 and # at least one previous place in this group
-                    i > 0 and # there is more than one button in total
-                    not self.extraeventsvisibility[i-1]) # and the previous one is hidden
-
-            if (i - first_visible_idx)%self.buttonlistmaxlen == 0: # left-most button in the row
-                if i == len(self.extraeventstypes)-1 or next_hidden:
-                    # a singleton button in a one element bar
-                    self.extraeventbuttonround.append(3)
-                else:
-                    # the left-most button in this bar
-                    self.extraeventbuttonround.append(1)
-            elif ((i - first_visible_idx)%self.buttonlistmaxlen < self.buttonlistmaxlen-1) and i != len(self.extraeventstypes)-1:
-                # a button in the middle of this bar
-                if prev_hidden and next_hidden:
-                    # we round both sides
-                    self.extraeventbuttonround.append(3)
-                elif prev_hidden:
-                    # we start a new rounded-group
-                    self.extraeventbuttonround.append(1)
-                elif next_hidden:
-                    self.extraeventbuttonround.append(2)
-                else:
-                    # squared button
+            if compact:
+                if not self.extraeventsvisibility[i] or i < first_visible_idx:
                     self.extraeventbuttonround.append(0)
-            # the right-most button in this bar
-            elif prev_hidden:
-                self.extraeventbuttonround.append(3)
+                else:
+                    pos_in_row = visible_count % self.buttonlistmaxlen
+                    is_first = (pos_in_row == 0)
+                    is_last = (pos_in_row == self.buttonlistmaxlen - 1)
+                    if is_first and is_last:
+                        self.extraeventbuttonround.append(3)
+                    elif is_first:
+                        self.extraeventbuttonround.append(1)
+                    elif is_last:
+                        self.extraeventbuttonround.append(2)
+                    else:
+                        self.extraeventbuttonround.append(0)
             else:
-                self.extraeventbuttonround.append(2)
+                # next button in this group is hidden
+                next_hidden = ((i - first_visible_idx)%self.buttonlistmaxlen < self.buttonlistmaxlen -1 and  # at least one more places in the group
+                        i+1 < len(self.extraeventstypes) and # there is one more button
+                        not self.extraeventsvisibility[i+1]) # and the next one is hidden
+                # previous button in this group is hidden
+                prev_hidden = ((i - first_visible_idx)%self.buttonlistmaxlen > 0 and # at least one previous place in this group
+                        i > 0 and # there is more than one button in total
+                        not self.extraeventsvisibility[i-1]) # and the previous one is hidden
+
+                if (i - first_visible_idx)%self.buttonlistmaxlen == 0: # left-most button in the row
+                    if i == len(self.extraeventstypes)-1 or next_hidden:
+                        # a singleton button in a one element bar
+                        self.extraeventbuttonround.append(3)
+                    else:
+                        # the left-most button in this bar
+                        self.extraeventbuttonround.append(1)
+                elif ((i - first_visible_idx)%self.buttonlistmaxlen < self.buttonlistmaxlen-1) and i != len(self.extraeventstypes)-1:
+                    # a button in the middle of this bar
+                    if prev_hidden and next_hidden:
+                        # we round both sides
+                        self.extraeventbuttonround.append(3)
+                    elif prev_hidden:
+                        # we start a new rounded-group
+                        self.extraeventbuttonround.append(1)
+                    elif next_hidden:
+                        self.extraeventbuttonround.append(2)
+                    else:
+                        # squared button
+                        self.extraeventbuttonround.append(0)
+                # the right-most button in this bar
+                elif prev_hidden:
+                    self.extraeventbuttonround.append(3)
+                else:
+                    self.extraeventbuttonround.append(2)
 
             p = QPushButton()
             p.setAutoDefault(False)
@@ -26707,101 +26740,117 @@ class ApplicationWindow(QMainWindow):
             self.buttonlist.append(p)
             self.buttonStates.append(0)
             #add button to row
-            if i < first_visible_idx:
-                pass
-            elif row1count < self.buttonlistmaxlen:
-                self.e1buttonbarLayout.addWidget(self.buttonlist[i])
-                if not self.extraeventsvisibility[i]:
-                    self.e1buttonbarLayout.addSpacing(5)
-                row1count += 1
-            elif row2count < self.buttonlistmaxlen:
-                self.e2buttonbarLayout.addWidget(self.buttonlist[i])
-                if not self.extraeventsvisibility[i]:
-                    self.e2buttonbarLayout.addSpacing(5)
-                row2count += 1
-            elif row3count < self.buttonlistmaxlen:
-                self.e3buttonbarLayout.addWidget(self.buttonlist[i])
-                if not self.extraeventsvisibility[i]:
-                    self.e3buttonbarLayout.addSpacing(5)
-                row3count += 1
-            elif row4count < self.buttonlistmaxlen:
-                self.e4buttonbarLayout.addWidget(self.buttonlist[i])
-                if not self.extraeventsvisibility[i]:
-                    self.e4buttonbarLayout.addSpacing(5)
-                row4count += 1
-            elif row5count < self.buttonlistmaxlen:
-                self.e5buttonbarLayout.addWidget(self.buttonlist[i])
-                if not self.extraeventsvisibility[i]:
-                    self.e5buttonbarLayout.addSpacing(5)
-                row5count += 1
-            elif row6count < self.buttonlistmaxlen:
-                self.e6buttonbarLayout.addWidget(self.buttonlist[i])
-                if not self.extraeventsvisibility[i]:
-                    self.e6buttonbarLayout.addSpacing(5)
-                row6count += 1
-            elif row7count < self.buttonlistmaxlen:
-                self.e7buttonbarLayout.addWidget(self.buttonlist[i])
-                if not self.extraeventsvisibility[i]:
-                    self.e7buttonbarLayout.addSpacing(5)
-                row7count += 1
-            elif row8count < self.buttonlistmaxlen:
-                self.e8buttonbarLayout.addWidget(self.buttonlist[i])
-                if not self.extraeventsvisibility[i]:
-                    self.e8buttonbarLayout.addSpacing(5)
-                row8count += 1
-            elif row9count < self.buttonlistmaxlen:
-                self.e9buttonbarLayout.addWidget(self.buttonlist[i])
-                if not self.extraeventsvisibility[i]:
-                    self.e9buttonbarLayout.addSpacing(5)
-                row9count += 1
+            if compact:
+                if i >= first_visible_idx and self.extraeventsvisibility[i]:
+                    row = visible_count // self.buttonlistmaxlen
+                    if row < 10:
+                        row_layouts[row].addWidget(self.buttonlist[i])
+                    else:
+                        _log.warning('realignbuttons: compact layout row >= 10, skipping button %s', i)
+                    visible_count += 1
             else:
-                self.e10buttonbarLayout.addWidget(self.buttonlist[i])
-                if not self.extraeventsvisibility[i]:
-                    self.e10buttonbarLayout.addSpacing(5)
-                row10count += 1
-                if row10count == self.buttonlistmaxlen:
-                    break
+                if i < first_visible_idx:
+                    pass
+                elif row1count < self.buttonlistmaxlen:
+                    self.e1buttonbarLayout.addWidget(self.buttonlist[i])
+                    if not self.extraeventsvisibility[i]:
+                        self.e1buttonbarLayout.addSpacing(5)
+                    row1count += 1
+                elif row2count < self.buttonlistmaxlen:
+                    self.e2buttonbarLayout.addWidget(self.buttonlist[i])
+                    if not self.extraeventsvisibility[i]:
+                        self.e2buttonbarLayout.addSpacing(5)
+                    row2count += 1
+                elif row3count < self.buttonlistmaxlen:
+                    self.e3buttonbarLayout.addWidget(self.buttonlist[i])
+                    if not self.extraeventsvisibility[i]:
+                        self.e3buttonbarLayout.addSpacing(5)
+                    row3count += 1
+                elif row4count < self.buttonlistmaxlen:
+                    self.e4buttonbarLayout.addWidget(self.buttonlist[i])
+                    if not self.extraeventsvisibility[i]:
+                        self.e4buttonbarLayout.addSpacing(5)
+                    row4count += 1
+                elif row5count < self.buttonlistmaxlen:
+                    self.e5buttonbarLayout.addWidget(self.buttonlist[i])
+                    if not self.extraeventsvisibility[i]:
+                        self.e5buttonbarLayout.addSpacing(5)
+                    row5count += 1
+                elif row6count < self.buttonlistmaxlen:
+                    self.e6buttonbarLayout.addWidget(self.buttonlist[i])
+                    if not self.extraeventsvisibility[i]:
+                        self.e6buttonbarLayout.addSpacing(5)
+                    row6count += 1
+                elif row7count < self.buttonlistmaxlen:
+                    self.e7buttonbarLayout.addWidget(self.buttonlist[i])
+                    if not self.extraeventsvisibility[i]:
+                        self.e7buttonbarLayout.addSpacing(5)
+                    row7count += 1
+                elif row8count < self.buttonlistmaxlen:
+                    self.e8buttonbarLayout.addWidget(self.buttonlist[i])
+                    if not self.extraeventsvisibility[i]:
+                        self.e8buttonbarLayout.addSpacing(5)
+                    row8count += 1
+                elif row9count < self.buttonlistmaxlen:
+                    self.e9buttonbarLayout.addWidget(self.buttonlist[i])
+                    if not self.extraeventsvisibility[i]:
+                        self.e9buttonbarLayout.addSpacing(5)
+                    row9count += 1
+                else:
+                    self.e10buttonbarLayout.addWidget(self.buttonlist[i])
+                    if not self.extraeventsvisibility[i]:
+                        self.e10buttonbarLayout.addSpacing(5)
+                    row10count += 1
+                    if row10count == self.buttonlistmaxlen:
+                        break
 
-        if self.e1buttonbarLayout.count() > 0:
-            self.e1buttondialog.setVisible(True)
-            self.e1buttonbarLayout.insertStretch(0)
-            self.e1buttonbarLayout.insertStretch(self.e1buttonbarLayout.count())
-        if self.e2buttonbarLayout.count() > 0:
-            self.e2buttondialog.setVisible(True)
-            self.e2buttonbarLayout.insertStretch(0)
-            self.e2buttonbarLayout.insertStretch(self.e2buttonbarLayout.count())
-        if self.e3buttonbarLayout.count() > 0:
-            self.e3buttondialog.setVisible(True)
-            self.e3buttonbarLayout.insertStretch(0)
-            self.e3buttonbarLayout.insertStretch(self.e3buttonbarLayout.count())
-        if self.e4buttonbarLayout.count() > 0:
-            self.e4buttondialog.setVisible(True)
-            self.e4buttonbarLayout.insertStretch(0)
-            self.e4buttonbarLayout.insertStretch(self.e4buttonbarLayout.count())
-        if self.e5buttonbarLayout.count() > 0:
-            self.e5buttondialog.setVisible(True)
-            self.e5buttonbarLayout.insertStretch(0)
-            self.e5buttonbarLayout.insertStretch(self.e5buttonbarLayout.count())
-        if self.e6buttonbarLayout.count() > 0:
-            self.e6buttondialog.setVisible(True)
-            self.e6buttonbarLayout.insertStretch(0)
-            self.e6buttonbarLayout.insertStretch(self.e6buttonbarLayout.count())
-        if self.e7buttonbarLayout.count() > 0:
-            self.e7buttondialog.setVisible(True)
-            self.e7buttonbarLayout.insertStretch(0)
-            self.e7buttonbarLayout.insertStretch(self.e7buttonbarLayout.count())
-        if self.e8buttonbarLayout.count() > 0:
-            self.e8buttondialog.setVisible(True)
-            self.e8buttonbarLayout.insertStretch(0)
-            self.e8buttonbarLayout.insertStretch(self.e8buttonbarLayout.count())
-        if self.e9buttonbarLayout.count() > 0:
-            self.e9buttondialog.setVisible(True)
-            self.e9buttonbarLayout.insertStretch(0)
-            self.e9buttonbarLayout.insertStretch(self.e9buttonbarLayout.count())
-        if self.e10buttonbarLayout.count() > 0:
-            self.e10buttondialog.setVisible(True)
-            self.e10buttonbarLayout.insertStretch(0)
-            self.e10buttonbarLayout.insertStretch(self.e10buttonbarLayout.count())
+        if compact:
+            for r, layout in enumerate(row_layouts):
+                if layout.count() > 0:
+                    row_dialogs[r].setVisible(True)
+                    layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                    layout.addStretch(1)
+        else:
+            if self.e1buttonbarLayout.count() > 0:
+                self.e1buttondialog.setVisible(True)
+                self.e1buttonbarLayout.insertStretch(0)
+                self.e1buttonbarLayout.insertStretch(self.e1buttonbarLayout.count())
+            if self.e2buttonbarLayout.count() > 0:
+                self.e2buttondialog.setVisible(True)
+                self.e2buttonbarLayout.insertStretch(0)
+                self.e2buttonbarLayout.insertStretch(self.e2buttonbarLayout.count())
+            if self.e3buttonbarLayout.count() > 0:
+                self.e3buttondialog.setVisible(True)
+                self.e3buttonbarLayout.insertStretch(0)
+                self.e3buttonbarLayout.insertStretch(self.e3buttonbarLayout.count())
+            if self.e4buttonbarLayout.count() > 0:
+                self.e4buttondialog.setVisible(True)
+                self.e4buttonbarLayout.insertStretch(0)
+                self.e4buttonbarLayout.insertStretch(self.e4buttonbarLayout.count())
+            if self.e5buttonbarLayout.count() > 0:
+                self.e5buttondialog.setVisible(True)
+                self.e5buttonbarLayout.insertStretch(0)
+                self.e5buttonbarLayout.insertStretch(self.e5buttonbarLayout.count())
+            if self.e6buttonbarLayout.count() > 0:
+                self.e6buttondialog.setVisible(True)
+                self.e6buttonbarLayout.insertStretch(0)
+                self.e6buttonbarLayout.insertStretch(self.e6buttonbarLayout.count())
+            if self.e7buttonbarLayout.count() > 0:
+                self.e7buttondialog.setVisible(True)
+                self.e7buttonbarLayout.insertStretch(0)
+                self.e7buttonbarLayout.insertStretch(self.e7buttonbarLayout.count())
+            if self.e8buttonbarLayout.count() > 0:
+                self.e8buttondialog.setVisible(True)
+                self.e8buttonbarLayout.insertStretch(0)
+                self.e8buttonbarLayout.insertStretch(self.e8buttonbarLayout.count())
+            if self.e9buttonbarLayout.count() > 0:
+                self.e9buttondialog.setVisible(True)
+                self.e9buttonbarLayout.insertStretch(0)
+                self.e9buttonbarLayout.insertStretch(self.e9buttonbarLayout.count())
+            if self.e10buttonbarLayout.count() > 0:
+                self.e10buttondialog.setVisible(True)
+                self.e10buttonbarLayout.insertStretch(0)
+                self.e10buttonbarLayout.insertStretch(self.e10buttonbarLayout.count())
         self.settooltip()
         if self.app.artisanviewerMode:
             self.buttonsAction.setEnabled(False)
