@@ -1019,6 +1019,13 @@ class EventsDlg(ArtisanResizeablDialog):
         self.sliderAlternativeLayoutFlag = QCheckBox(QApplication.translate('CheckBox','Alternative Layout'))
         self.sliderAlternativeLayoutFlag.setToolTip(QApplication.translate('Tooltip', 'Group Slider 1 with Slider 4 and Slider 2 with Slider 3'))
         self.sliderAlternativeLayoutFlag.setChecked(self.aw.eventsliderAlternativeLayout)
+        self.sliderDockPositionLabel = QLabel(QApplication.translate('Label','Sliders position'))
+        self.sliderDockPositionComboBox = QComboBox()
+        self.sliderDockPositionComboBox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.sliderDockPositionComboBox.addItem(QApplication.translate('ComboBox', 'Left'), 'left')
+        self.sliderDockPositionComboBox.addItem(QApplication.translate('ComboBox', 'Bottom'), 'bottom')
+        idx = self.sliderDockPositionComboBox.findData(self.aw.eventsliderDockPosition)
+        self.sliderDockPositionComboBox.setCurrentIndex(idx if idx >= 0 else 0)
         self.E1visibility = QCheckBox(self.aw.qmc.etypesf(0))
         self.E1visibility.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.E1visibility.stateChanged.connect(self.slider1_visibility_changed)
@@ -1692,6 +1699,9 @@ class EventsDlg(ArtisanResizeablDialog):
         SliderHelpHBox.addWidget(helpsliderDialogButton)
         SliderHelpHBox.addStretch()
         SliderHelpHBox.addWidget(self.sliderAlternativeLayoutFlag)
+        SliderHelpHBox.addSpacing(10)
+        SliderHelpHBox.addWidget(self.sliderDockPositionLabel)
+        SliderHelpHBox.addWidget(self.sliderDockPositionComboBox)
         SliderHelpHBox.addSpacing(10)
         SliderHelpHBox.addWidget(self.sliderKeyboardControlflag)
         C5VBox = QVBoxLayout()
@@ -3417,6 +3427,10 @@ class EventsDlg(ArtisanResizeablDialog):
         self.aw.eventsliderunits[3] = self.E4unit.text()
         self.aw.updateSliderMinMax()
         self.aw.slidersAction.setEnabled(any(self.aw.eventslidervisibilities) or self.aw.pidcontrol.svSlider)
+        pos = self.sliderDockPositionComboBox.currentData()
+        if pos in ('left', 'bottom'):
+            self.aw.eventsliderDockPosition = pos
+            self.aw.applySliderDockPosition()
 
     def saveQuantifierSettings(self) -> None:
         self.aw.clusterEventsFlag = bool(self.clusterEventsFlag.isChecked())

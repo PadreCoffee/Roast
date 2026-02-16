@@ -1927,6 +1927,7 @@ class ApplicationWindow(QMainWindow):
         self.eventsliderKeyboardControl:bool = True # if false sliders cannot be moved using up/down keys
         self.eventsliderAlternativeLayout_default:Final[bool] = False # if True group slider 1+4 and 2+3 instead of slider 1+2 and 3+4
         self.eventsliderAlternativeLayout:bool = self.eventsliderAlternativeLayout_default
+        self.eventsliderDockPosition:str = 'left'  # 'left'|'bottom'
         self.eventslideractions:list[int] = [0]*self.eventsliders # 0: None, 1: Serial Command, 2: Modbus Command, 3: DTA Command, 4: Call Program, 5: Hottop Heater, 6: Hottop Fan
         self.eventslidercommands:list[str] = ['']*self.eventsliders
         self.eventslideroffsets:list[float] = [0.0]*self.eventsliders
@@ -4184,7 +4185,7 @@ class ApplicationWindow(QMainWindow):
 #        self.sliderDock.setWindowTitle(QApplication.translate('Tab','Sliders'))
         self.sliderDock.setWidget(self.sliderFrame)
         self.sliderFrame.setSizePolicy(QSizePolicy.Policy.Fixed,QSizePolicy.Policy.Ignored)
-        self.sliderDock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea|Qt.DockWidgetArea.RightDockWidgetArea)
+        self.sliderDock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea|Qt.DockWidgetArea.RightDockWidgetArea|Qt.DockWidgetArea.BottomDockWidgetArea)
         self.sliderDock.setFloating(False)
         self.sliderDock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures | QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
 
@@ -11788,6 +11789,20 @@ class ApplicationWindow(QMainWindow):
                 else:
                     self.eventslidersflags[0] = 1
 
+    def applySliderDockPosition(self) -> None:
+        """Apply slider dock position (left or bottom). Call after restoreState when loading if eventsliderDockPosition was in settings."""
+        try:
+            area = (Qt.DockWidgetArea.BottomDockWidgetArea if self.eventsliderDockPosition == 'bottom' else Qt.DockWidgetArea.LeftDockWidgetArea)
+            self.removeDockWidget(self.sliderDock)
+            self.addDockWidget(area, self.sliderDock)
+            # Preserve show/hide state
+            if self.slidersVisible():
+                self.sliderDock.setVisible(True)
+            else:
+                self.sliderDock.setVisible(False)
+        except Exception as e: # pylint: disable=broad-except
+            _log.exception(e)
+
     @pyqtSlot()
     @pyqtSlot(bool)
     def toggleSliders(self,_:bool = False) -> None:
@@ -19180,6 +19195,13 @@ class ApplicationWindow(QMainWindow):
             if len(eventsliderunits) == self.eventsliders:
                 self.eventsliderunits = eventsliderunits
             self.qmc.mode_tempsliders = ('F' if str(settings.value('ModeTempSliders',self.qmc.mode_tempsliders)) == 'F' else 'C')
+            if settings.contains('eventsliderDockPosition'):
+                self.eventsliderDockPosition = str(settings.value('eventsliderDockPosition', 'left'))
+                if self.eventsliderDockPosition not in ('left', 'bottom'):
+                    self.eventsliderDockPosition = 'left'
+                self._apply_slider_dock_position_after_restore = True
+            else:
+                self._apply_slider_dock_position_after_restore = False
             settings.endGroup()
             self.qmc.adjustTempSliders() # adjust min/max slider limits of temperature sliders to correspond to the current temp mode
 #--- END GROUP Sliders
@@ -19545,6 +19567,9 @@ class ApplicationWindow(QMainWindow):
                 #restore main window state (like dock widget positions)
                 if settings.contains('MainWindowState'):
                     self.restoreState(settings.value('MainWindowState'))
+                # Apply slider dock position after restoreState only if user had saved it (key existed)
+                if getattr(self, '_apply_slider_dock_position_after_restore', False):
+                    self.applySliderDockPosition()
             if not filename: # only if an external settings file is loaded
                 FigureCanvas.updateGeometry(self.qmc.canvas)  #@UndefinedVariable
 
@@ -21097,6 +21122,7 @@ class ApplicationWindow(QMainWindow):
             self.settingsSetValue(settings, default_settings, 'slidervisibilities',self.eventslidervisibilities, read_defaults)
             self.settingsSetValue(settings, default_settings, 'eventsliderKeyboardControl',self.eventsliderKeyboardControl, read_defaults)
             self.settingsSetValue(settings, default_settings, 'eventsliderAlternativeLayout',self.eventsliderAlternativeLayout, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'eventsliderDockPosition',self.eventsliderDockPosition, read_defaults)
             self.settingsSetValue(settings, default_settings, 'slideractions',self.eventslideractions, read_defaults)
             self.settingsSetValue(settings, default_settings, 'slidercommands',self.eventslidercommands, read_defaults)
             self.settingsSetValue(settings, default_settings, 'slideroffsets',self.eventslideroffsets, read_defaults)
