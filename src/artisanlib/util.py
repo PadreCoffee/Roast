@@ -891,7 +891,7 @@ def timearray2index(timearray:list[float], time:float, nearest:bool = True) -> i
 
 def findTPint(timeindex:list[int], timex:list[float], temp:list[float]) -> int:
     TP:float = 1000
-    idx:int = 0
+    idx:int = -1
     start:int = 0
     end:int = len(timex)
     # try to consider only indices until the roast end and not beyond
@@ -912,6 +912,8 @@ def findTPint(timeindex:list[int], timex:list[float], temp:list[float]) -> int:
         SOR_index = timeindex[0]
     if start < SOR_index < end:
         start = SOR_index
+    if start >= end:
+        return -1
     for i in range(end - 1, start -1, -1):
         if temp[i] > 0 and temp[i] < TP:
             TP = temp[i]

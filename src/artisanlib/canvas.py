@@ -3075,20 +3075,6 @@ class tgraphcanvas(QObject):
 
     @pyqtSlot(str, bool)
     def showCurve(self, name: str, state: bool) -> None:
-        # #region agent log
-        try:
-            _roast_debug_log_json({
-                'event': 'showCurve_called',
-                'name': name,
-                'state': state,
-                'backgroundETcurve': getattr(self, 'backgroundETcurve', None),
-                'backgroundBTcurve': getattr(self, 'backgroundBTcurve', None),
-                'DeltaETBflag': getattr(self, 'DeltaETBflag', None),
-                'DeltaBTBflag': getattr(self, 'DeltaBTBflag', None),
-            })
-        except Exception:  # pylint: disable=broad-except
-            pass
-        # #endregion
         # Aliases so menu checkboxes (e.g. BG_ET, BG_BTror) map to canvas flags
         if name in ('BG_ET', 'BG_BackgroundET', 'BackgroundETcurve'):
             name = 'BackgroundET'
@@ -4700,9 +4686,9 @@ class tgraphcanvas(QObject):
         if raw_key == 'roast_ror_bt':
             return bool(self.DeltaBTBflag)
         if raw_key == 'extra_0':
-            return bool(self.xtcurveidx > 0 and self.extra_channel_visible(self.xtcurveidx))
+            return bool(self.xtcurveidx > 0)
         if raw_key == 'extra_1':
-            return bool(self.ytcurveidx > 0 and self.extra_channel_visible(self.ytcurveidx))
+            return bool(self.ytcurveidx > 0)
         if raw_key.startswith('control_'):
             try:
                 ci = int(raw_key.split('_')[1])
@@ -5156,6 +5142,13 @@ class tgraphcanvas(QObject):
                 if not self.bg_enabled_for_raw_key(f'control_{ci}'):
                     continue
                 bg = self._bg_value_at(f'control_{ci}', t_bg)
+                if bg is not None:
+                    suffix, bg_color = bg
+                    lines.append((f"BG_{suffix}", bg_color))
+            for raw_key in ('extra_0', 'extra_1'):
+                if not self.bg_enabled_for_raw_key(raw_key):
+                    continue
+                bg = self._bg_value_at(raw_key, t_bg)
                 if bg is not None:
                     suffix, bg_color = bg
                     lines.append((f"BG_{suffix}", bg_color))
@@ -11992,11 +11985,15 @@ class tgraphcanvas(QObject):
                         self._bg_roast_lines.append(ln_bt)
                         self._bg_color_map['BT'] = self._hover_color_to_hex(self.backgroundbtcolor)
                         self._bg_hover_cache['roast_bt'] = (self.timeB, temp_btb)
-                    if self.xtcurveidx > 0 and self.extra_channel_visible(self.xtcurveidx):
+                    # Draw BG extra by dropdown selection only (no extra_channel_visible), matching classic l_back3/l_back4 behavior.
+                    if self.xtcurveidx > 0:
                         idx3 = self.xtcurveidx - 1
                         n3 = idx3 // 2
                         if len(self.stemp1BX) > n3 and len(self.stemp2BX) > n3 and len(self.extratimexB) > n3:
                             stemp3B = self.stemp1BX[n3] if self.xtcurveidx % 2 else self.stemp2BX[n3]
+                            # Cache for bubble: use series same length as extratimexB[n3] so bg_interp_linear works
+                            stemp3B_cache = numpy.ma.masked_where(stemp3B == -1, numpy.asarray(stemp3B, dtype=numpy.double))
+                            self._bg_hover_cache['extra_0'] = (self.extratimexB[n3], stemp3B_cache)
                             if not self.backgroundShowFullflag:
                                 if not self.autotimex or self.autotimexMode == 0:
                                     stemp3B = numpy.concatenate((numpy.full(bcharge_idx, numpy.nan, dtype=numpy.double), stemp3B[bcharge_idx:bdrop_idx+1], numpy.full(len(self.timeB) - bdrop_idx - 1, numpy.nan, dtype=numpy.double)))
@@ -12010,12 +12007,14 @@ class tgraphcanvas(QObject):
                             ln_x, = self.ax.plot(self.extratimexB[n3], stemp3B, transform=trans, color=self.backgroundxtcolor, label='_bg_XT', **_kw)
                             self._bg_roast_lines.append(ln_x)
                             self._bg_color_map['XT'] = self._hover_color_to_hex(self.backgroundxtcolor)
-                            self._bg_hover_cache['extra_0'] = (self.extratimexB[n3], stemp3B)
-                    if self.ytcurveidx > 0 and self.extra_channel_visible(self.ytcurveidx):
+                    if self.ytcurveidx > 0:
                         idx4 = self.ytcurveidx - 1
                         n4 = idx4 // 2
                         if len(self.stemp1BX) > n4 and len(self.stemp2BX) > n4 and len(self.extratimexB) > n4:
                             stemp4B = self.stemp1BX[n4] if self.ytcurveidx % 2 else self.stemp2BX[n4]
+                            # Cache for bubble: use series same length as extratimexB[n4] so bg_interp_linear works
+                            stemp4B_cache = numpy.ma.masked_where(stemp4B == -1, numpy.asarray(stemp4B, dtype=numpy.double))
+                            self._bg_hover_cache['extra_1'] = (self.extratimexB[n4], stemp4B_cache)
                             if not self.backgroundShowFullflag:
                                 if not self.autotimex or self.autotimexMode == 0:
                                     stemp4B = numpy.concatenate((numpy.full(bcharge_idx, numpy.nan, dtype=numpy.double), stemp4B[bcharge_idx:bdrop_idx+1], numpy.full(len(self.timeB) - bdrop_idx - 1, numpy.nan, dtype=numpy.double)))
@@ -12029,7 +12028,6 @@ class tgraphcanvas(QObject):
                             ln_y, = self.ax.plot(self.extratimexB[n4], stemp4B, transform=trans, color=self.backgroundytcolor, label='_bg_YT', **_kw)
                             self._bg_roast_lines.append(ln_y)
                             self._bg_color_map['YT'] = self._hover_color_to_hex(self.backgroundytcolor)
-                            self._bg_hover_cache['extra_1'] = (self.extratimexB[n4], stemp4B)
                     if self.ax_controls is not None and len(self.backgroundEvents) > 0:
                         event_pos_offset = self.eventpositionbars[0]
                         event_pos_factor = self.eventpositionbars[1] - self.eventpositionbars[0]
@@ -12136,7 +12134,8 @@ class tgraphcanvas(QObject):
                     for idx, label in main_labels:
                         if idx == -1:
                             tp_idx = self.aw.findTP()
-                            if tp_idx is not None and tp_idx >= 0 and len(self.timex) > tp_idx:
+                            if (self.timeindex[0] >= 0 and tp_idx is not None and tp_idx >= self.timeindex[0]
+                                    and len(self.timex) > tp_idx):
                                 roest_events.append((self.timex[tp_idx], label, 0))
                         elif idx == 0:
                             if self.timeindex[0] >= 0 and len(self.timex) > self.timeindex[0]:
@@ -12145,8 +12144,7 @@ class tgraphcanvas(QObject):
                             roest_events.append((self.timex[self.timeindex[idx]], label, 0))
                 if roest_events and self.ax is not None:
                     roest_events_sorted = sorted(roest_events, key=lambda x: (x[0], x[2]))
-                    _trans_top = self.ax.get_xaxis_transform()
-                    y_label = 0.06  # single line below graphs, always visible
+                    _blended = transforms.blended_transform_factory(self.ax.transData, self.ax.transAxes)
                     for t, label, _ in roest_events_sorted:
                         vl = self.ax.axvline(t, color='#444444', linestyle=':', linewidth=1, alpha=0.6, zorder=50)
                         self.l_roest_vlines.append(vl)
@@ -12161,12 +12159,23 @@ class tgraphcanvas(QObject):
                         label_str = self.aw.arabicReshape(label)
                         if bt_temp is not None:
                             temp_str = f'{bt_temp:.1f}°{self.mode}'
-                            line_text = f'{label_str}: {temp_str}'
+                            line_text = f'{label_str} {temp_str}'
                         else:
                             line_text = label_str
                         fontprop = _safe_regular_fontproperties(size=9.0)
-                        name_text = self.ax.text(t, y_label, line_text, transform=_trans_top, rotation=90, va='top', ha='center',
-                                                fontproperties=fontprop, color=self.palette['text'], zorder=70, clip_on=False)
+                        name_text = self.ax.annotate(
+                            line_text,
+                            xy=(t, 0.0),
+                            xycoords=_blended,
+                            textcoords='offset points',
+                            xytext=(2, 8),
+                            va='bottom', ha='center', rotation=90,
+                            fontproperties=fontprop,
+                            color=self.palette['text'],
+                            annotation_clip=True,
+                            zorder=75,
+                            bbox=dict(boxstyle='round,pad=0.2', facecolor=self.palette.get('background', '#ffffff'), edgecolor='none', alpha=0.85)
+                        )
                         name_text.set_in_layout(False)
                         self.l_roest_labels.append(name_text)
                 self.E1timex, self.E2timex, self.E3timex, self.E4timex = [], [], [], []
@@ -14009,7 +14018,8 @@ class tgraphcanvas(QObject):
                                 for idx, label in main_labels:
                                     if idx == -1:
                                         tp_idx = self.aw.findTP()
-                                        if tp_idx is not None and tp_idx >= 0 and len(self.timex) > tp_idx:
+                                        if (self.timeindex[0] >= 0 and tp_idx is not None and tp_idx >= self.timeindex[0]
+                                                and len(self.timex) > tp_idx):
                                             t = self.timex[tp_idx]
                                             roest_events.append((t, label, 0))
                                     elif idx == 0:
@@ -14210,88 +14220,44 @@ class tgraphcanvas(QObject):
                                         except Exception as e: # pylint: disable=broad-except
                                             _log.exception(e)
 
-                            # Draw Roest-style markers: vertical dashed lines + NAME + BT temp on the line at top
-                            # Roest markers for MAIN roast events only (no control events)
-                            if self.is_roest_mode() and roest_events and self.ax is not None:
-                                roest_events_sorted = sorted(roest_events, key=lambda x: (x[0], x[2]))  # by time, then category
-                                # Blended transform: x=data coords, y=axes fraction (0=bottom, 1=top of ax)
-                                _trans_top = self.ax.get_xaxis_transform()
-                                # For anti-overlap of top labels: alternate between y=0.88 and y=0.73 if events are close
-                                _prev_t = None
-                                _lane = 0  # 0 or 1 for alternating y positions
-                                _y_lanes = [0.88, 0.73]
+                            # Draw Roest-style markers: vertical dashed lines + one label line (same style as redraw_roast_like)
+                            # Only draw here if redraw_roast_like did not already draw (avoid duplicate labels)
+                            if self.is_roest_mode() and roest_events and self.ax is not None and not self.l_roest_labels:
+                                roest_events_sorted = sorted(roest_events, key=lambda x: (x[0], x[2]))
+                                _blended = transforms.blended_transform_factory(self.ax.transData, self.ax.transAxes)
                                 for t, label, _ in roest_events_sorted:
-                                    # Anti-overlap: if events within 15 seconds, alternate lane
-                                    if _prev_t is not None and abs(t - _prev_t) < 15:
-                                        _lane = 1 - _lane
-                                    else:
-                                        _lane = 0
-                                    _prev_t = t
-                                    # 1) Vertical dashed guide line on ax_roast
                                     vl = self.ax.axvline(t, color='#444444', linestyle=':', linewidth=1, alpha=0.6, zorder=50)
                                     self.l_roest_vlines.append(vl)
-                                    # Mirror on ax_controls
                                     if self.ax_controls is not None:
                                         vl_ctrl = self.ax_controls.axvline(t, color='#444444', linestyle=':', linewidth=1, alpha=0.5, zorder=50)
                                         self.l_roest_vlines.append(vl_ctrl)
-                                    # 2) Compute BT temperature at event time x
                                     bt_temp = None
                                     if len(self.timex) > 0 and len(self.temp2) == len(self.timex):
-                                        # Find nearest index
                                         _idx = min(range(len(self.timex)), key=lambda i: abs(self.timex[i] - t))
                                         if self.temp2[_idx] is not None and self.temp2[_idx] > 0:
                                             bt_temp = self.temp2[_idx]
-                                    # 3) Event NAME + BT temp on the vertical line at top
-                                    # Format: "EVENT 165.0°C" (name above, temp below, fixed gap, no overlap)
-                                    _y_top = _y_lanes[_lane]
-                                    temp_unit = self.mode  # 'C' or 'F'
-                                    label_fontprop = _safe_regular_fontproperties(size=9.0)   # never raises
-                                    temp_fontprop = _safe_bold_fontproperties(size=9.0)       # never raises
+                                    label_str = self.aw.arabicReshape(label)
                                     if bt_temp is not None:
-                                        # Event name (normal, above) + Temperature (bold, below)
-                                        temp_str = f'{bt_temp:.1f}°{temp_unit}'
-                                        label_str = self.aw.arabicReshape(label)
-                                        # Create event name text (above, at original y position)
-                                        name_text = self.ax.text(
-                                            t, _y_top, label_str,
-                                            transform=_trans_top,
-                                            rotation=90, va='top', ha='center',
-                                            fontproperties=label_fontprop,
-                                            color=self.palette['text'],
-                                            zorder=70,
-                                            clip_on=False
-                                        )
-                                        name_text.set_in_layout(False)
-                                        self.l_roest_labels.append(name_text)
-                                        # Create bold temp text (below name, offset based on label length)
-                                        # Dynamic offset: ~0.014 per character + small fixed gap
-                                        _label_offset = len(label_str) * 0.014 + 0.025
-                                        _y_temp = _y_top - _label_offset
-                                        temp_text = self.ax.text(
-                                            t, _y_temp, temp_str,
-                                            transform=_trans_top,
-                                            rotation=90, va='top', ha='center',
-                                            fontproperties=temp_fontprop,
-                                            color=self.palette['text'],
-                                            zorder=70,
-                                            clip_on=False
-                                        )
-                                        temp_text.set_in_layout(False)
-                                        self.l_roest_labels.append(temp_text)
+                                        temp_str = f'{bt_temp:.1f}°{self.mode}'
+                                        line_text = f'{label_str} {temp_str}'
                                     else:
-                                        # No temperature, just event name (normal weight)
-                                        label_text = self.aw.arabicReshape(label)
-                                        name_text = self.ax.text(
-                                            t, _y_top, label_text,
-                                            transform=_trans_top,
-                                            rotation=90, va='top', ha='center',
-                                            fontproperties=label_fontprop,
-                                            color=self.palette['text'],
-                                            zorder=70,
-                                            clip_on=False
-                                        )
-                                        name_text.set_in_layout(False)
-                                        self.l_roest_labels.append(name_text)
+                                        line_text = label_str
+                                    fontprop = _safe_regular_fontproperties(size=9.0)
+                                    name_text = self.ax.annotate(
+                                        line_text,
+                                        xy=(t, 0.0),
+                                        xycoords=_blended,
+                                        textcoords='offset points',
+                                        xytext=(2, 8),
+                                        va='bottom', ha='center', rotation=90,
+                                        fontproperties=fontprop,
+                                        color=self.palette['text'],
+                                        annotation_clip=True,
+                                        zorder=75,
+                                        bbox=dict(boxstyle='round,pad=0.2', facecolor=self.palette.get('background', '#ffffff'), edgecolor='none', alpha=0.85)
+                                    )
+                                    name_text.set_in_layout(False)
+                                    self.l_roest_labels.append(name_text)
 
                             E1x:list[float|None]
                             E1y:list[float|None]
