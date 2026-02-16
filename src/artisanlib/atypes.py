@@ -390,7 +390,8 @@ Palette = tuple[
     list[int],    # 24: slider bernoulli flags; len=self.eventsliders
     str,          # 25: label
     list[int],    # 26: quantifier action flags; len=self.eventsliders
-    list[int]    # 27: quantifier SV flags; len=self.eventsliders
+    list[int],    # 27: quantifier SV flags; len=self.eventsliders
+    list[int]     # 28: extra event layout roles; len=len(extraeventslabels); 0=button, 1=spacer, 2=row_break
     ]
 
 class BTU(TypedDict):

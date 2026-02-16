@@ -60,6 +60,8 @@ class EventsDlg(ArtisanResizeablDialog):
         self.extraeventsactionstrings:list[str] = []
         self.extraeventsactions:list[int] = []
         self.extraeventsvisibility:list[int] = []
+        # Layout role per row: 0=button, 1=spacer, 2=row_break. Synced with extraeventstypes length.
+        self.extraeventslayoutroles:list[int] = []
 
         self.eventslidervisibilities:list[int] = [0,0,0,0]
         self.eventslideractions:list[int] = [0,0,0,0]
@@ -722,6 +724,12 @@ class EventsDlg(ArtisanResizeablDialog):
         self.insertButton.setMinimumWidth(80)
         self.insertButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.insertButton.setEnabled(False)
+        self.insertSpacerButton: QPushButton = QPushButton(QApplication.translate('Button','Insert spacer'))
+        self.insertSpacerButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.insertSpacerButton.clicked.connect(self.insertSpacerSlot)
+        self.insertRowBreakButton: QPushButton = QPushButton(QApplication.translate('Button','Insert row break'))
+        self.insertRowBreakButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.insertRowBreakButton.clicked.connect(self.insertRowBreakSlot)
         helpDialogButton = QDialogButtonBox()
         helpButtonD: QPushButton|None = helpDialogButton.addButton(QDialogButtonBox.StandardButton.Help)
         if helpButtonD is not None:
@@ -1031,6 +1039,14 @@ class EventsDlg(ArtisanResizeablDialog):
         self.sliderContainerModeComboBox.addItem(QApplication.translate('ComboBox', 'Embedded under graphs'), 'embedded')
         idx = self.sliderContainerModeComboBox.findData(getattr(self.aw, 'eventsliderContainerMode', 'dock_left'))
         self.sliderContainerModeComboBox.setCurrentIndex(idx if idx >= 0 else 0)
+        self.sliderLayoutModeLabel = QLabel(QApplication.translate('Label', 'Sliders layout'))
+        self.sliderLayoutModeComboBox = QComboBox()
+        self.sliderLayoutModeComboBox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.sliderLayoutModeComboBox.addItem(QApplication.translate('ComboBox', 'Auto (recommended)'), 'auto')
+        self.sliderLayoutModeComboBox.addItem(QApplication.translate('ComboBox', 'Vertical (legacy)'), 'vertical')
+        self.sliderLayoutModeComboBox.addItem(QApplication.translate('ComboBox', 'Horizontal row'), 'horizontal')
+        idx_layout = self.sliderLayoutModeComboBox.findData(getattr(self.aw, 'eventsliderLayoutMode', 'auto'))
+        self.sliderLayoutModeComboBox.setCurrentIndex(idx_layout if idx_layout >= 0 else 0)
         self.E1visibility = QCheckBox(self.aw.qmc.etypesf(0))
         self.E1visibility.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.E1visibility.stateChanged.connect(self.slider1_visibility_changed)
@@ -1544,9 +1560,17 @@ class EventsDlg(ArtisanResizeablDialog):
         topLineLayout.setContentsMargins(0,0,0,0)
         tab1layout.setSpacing(2)
         tab1layout.setContentsMargins(0,0,0,0)
+        legacyLayoutGroupBox = QGroupBox(QApplication.translate('GroupBox', 'Legacy layout (deprecated)'))
+        legacyLayoutGroupBox.setToolTip(QApplication.translate('Tooltip', 'Max buttons per row and compact mode. Prefer Role column: Spacer and Row break for layout.'))
+        legacyLayoutInner = QHBoxLayout()
+        legacyLayoutInner.addWidget(self.nbuttonslabel)
+        legacyLayoutInner.addWidget(self.nbuttonsSpinBox)
+        legacyLayoutInner.addSpacing(10)
+        legacyLayoutInner.addWidget(self.extraeventbuttonsCompactLayoutCheckBox)
+        legacyLayoutInner.addStretch()
+        legacyLayoutGroupBox.setLayout(legacyLayoutInner)
         nbuttonslayout = QHBoxLayout()
-        nbuttonslayout.addWidget(self.nbuttonslabel)
-        nbuttonslayout.addWidget(self.nbuttonsSpinBox)
+        nbuttonslayout.addWidget(legacyLayoutGroupBox)
         nbuttonslayout.addSpacing(10)
         nbuttonslayout.addWidget(nbuttonsSizeLabel)
         nbuttonslayout.addWidget(self.nbuttonsSizeBox)
@@ -1557,12 +1581,12 @@ class EventsDlg(ArtisanResizeablDialog):
         nbuttonslayout.addWidget(self.markLastButtonPressed)
         nbuttonslayout.addSpacing(10)
         nbuttonslayout.addWidget(self.showExtraButtonTooltips)
-        nbuttonslayout.addSpacing(10)
-        nbuttonslayout.addWidget(self.extraeventbuttonsCompactLayoutCheckBox)
         nbuttonslayout.addStretch()
         tab2buttonlayout = QHBoxLayout()
         tab2buttonlayout.addWidget(addButton)
         tab2buttonlayout.addWidget(self.insertButton)
+        tab2buttonlayout.addWidget(self.insertSpacerButton)
+        tab2buttonlayout.addWidget(self.insertRowBreakButton)
         tab2buttonlayout.addWidget(delButton)
         tab2buttonlayout.addWidget(self.copyeventbuttonTableButton)
         tab2buttonlayout.addStretch()
@@ -1709,6 +1733,9 @@ class EventsDlg(ArtisanResizeablDialog):
         SliderHelpHBox.addSpacing(10)
         SliderHelpHBox.addWidget(self.sliderContainerModeLabel)
         SliderHelpHBox.addWidget(self.sliderContainerModeComboBox)
+        SliderHelpHBox.addSpacing(10)
+        SliderHelpHBox.addWidget(self.sliderLayoutModeLabel)
+        SliderHelpHBox.addWidget(self.sliderLayoutModeComboBox)
         SliderHelpHBox.addSpacing(10)
         SliderHelpHBox.addWidget(self.sliderKeyboardControlflag)
         C5VBox = QVBoxLayout()
@@ -2480,7 +2507,9 @@ class EventsDlg(ArtisanResizeablDialog):
                 # added quantifier actions
                 self.aw.eventquantifieraction[:],
                 # added quantifier SV
-                self.aw.eventquantifierSV[:]
+                self.aw.eventquantifierSV[:],
+                # layout roles: 0=button, 1=spacer, 2=row_break
+                self.extraeventslayoutroles[:]
             )
             self.aw.buttonpalette[pindex] = copy
             self.aw.buttonpalettemaxlen[pindex] = self.nbuttonsSpinBox.value()
@@ -2505,6 +2534,10 @@ class EventsDlg(ArtisanResizeablDialog):
                 self.extraeventsdescriptions = copy[6][:] # pylint: disable=attribute-defined-outside-init
                 self.extraeventbuttoncolor = copy[7][:] # pylint: disable=attribute-defined-outside-init
                 self.extraeventbuttontextcolor = copy[8][:] # pylint: disable=attribute-defined-outside-init
+                if len(copy) > 28 and len(copy[28]) == len(copy[0]):
+                    self.extraeventslayoutroles = [min(2, max(0, int(r))) for r in copy[28][:]] # pylint: disable=attribute-defined-outside-init
+                else:
+                    self.extraeventslayoutroles = [0] * len(copy[0]) # pylint: disable=attribute-defined-outside-init
                 # added slider settings
                 if len(copy)>9 and len(copy[9]) == 4:
                     self.aw.eventslidervisibilities = copy[9][:]
@@ -2742,7 +2775,7 @@ class EventsDlg(ArtisanResizeablDialog):
         self.aw.buttonlistmaxlen = self.nbuttonsSpinBox.value()
 
     def createEventbuttonTable(self) -> None:
-        columns = 9
+        columns = 10
         if self.eventbuttontable.columnCount() == columns:
             # rows have been already established
             # save the current columnWidth to reset them after table creation
@@ -2766,9 +2799,8 @@ class EventsDlg(ArtisanResizeablDialog):
                                                          QApplication.translate('Table','Documentation'),
                                                          QApplication.translate('Table','Visibility'),
                                                          QApplication.translate('Table','Color'),
-                                                         QApplication.translate('Table','Text Color')
-                                                         #,''
-                                                         ])
+                                                         QApplication.translate('Table','Text Color'),
+                                                         QApplication.translate('Table','Role')])
         self.eventbuttontable.setAlternatingRowColors(True)
         self.eventbuttontable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.eventbuttontable.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -2847,7 +2879,16 @@ class EventsDlg(ArtisanResizeablDialog):
             visibilityComboBox.addItems(visibility)
             visibilityComboBox.setCurrentIndex(self.extraeventsvisibility[i])
             visibilityComboBox.currentIndexChanged.connect(self.setvisibilitytyeventbutton)
-            #7 Color
+            #7 Role: 0=Button, 1=Spacer, 2=Row break
+            roleComboBox = MyQComboBox()
+            roleComboBox.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            roleComboBox.addItem(QApplication.translate('ComboBox', 'Button'), 0)
+            roleComboBox.addItem(QApplication.translate('ComboBox', 'Spacer'), 1)
+            roleComboBox.addItem(QApplication.translate('ComboBox', 'Row break'), 2)
+            role_idx = min(2, max(0, self.extraeventslayoutroles[i] if i < len(self.extraeventslayoutroles) else 0))
+            roleComboBox.setCurrentIndex(roleComboBox.findData(role_idx) if roleComboBox.findData(role_idx) >= 0 else 0)
+            roleComboBox.currentIndexChanged.connect(self.setroleeventbutton)
+            #8 Color
             colorButton = QPushButton('Select')
             colorButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             colorButton.clicked.connect(self.setbuttoncolor)
@@ -2856,7 +2897,7 @@ class EventsDlg(ArtisanResizeablDialog):
             label = self.aw.substButtonLabel(-1,label,et, self.extraeventsvalues[i])
             colorButton.setText(label)
             colorButton.setStyleSheet(f'border: none; outline: none; background-color: {self.extraeventbuttoncolor[i]}; color: {self.extraeventbuttontextcolor[i]};')
-            #8 Text Color
+            #9 Text Color
             colorTextButton = QPushButton('Select')
             colorTextButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             colorTextButton.clicked.connect(self.setbuttontextcolor)
@@ -2872,6 +2913,7 @@ class EventsDlg(ArtisanResizeablDialog):
             self.eventbuttontable.setCellWidget(i,6,visibilityComboBox)
             self.eventbuttontable.setCellWidget(i,7,colorButton)
             self.eventbuttontable.setCellWidget(i,8,colorTextButton)
+            self.eventbuttontable.setCellWidget(i,9,roleComboBox)
 
 
         hheader = self.eventbuttontable.horizontalHeader()
@@ -2944,6 +2986,10 @@ class EventsDlg(ArtisanResizeablDialog):
                 # text color
                 colorTextButton = cast(QPushButton, self.eventbuttontable.cellWidget(r,8))
                 rows.append(colorTextButton.palette().button().color().name())
+                # role
+                roleComboBox = cast(MyQComboBox, self.eventbuttontable.cellWidget(r,9))
+                role_data = roleComboBox.currentData()
+                rows.append(roleComboBox.currentText() if role_data is not None else 'Button')
                 tbl.add_row(rows)
             clipboard = tbl.get_string()
         else:
@@ -2974,7 +3020,9 @@ class EventsDlg(ArtisanResizeablDialog):
                 colorButton = cast(QPushButton, self.eventbuttontable.cellWidget(r,7))
                 clipboard += colorButton.palette().button().color().name() + '\t'
                 colorTextButton = cast(QPushButton, self.eventbuttontable.cellWidget(r,8))
-                clipboard += colorTextButton.palette().button().color().name() + '\n'
+                clipboard += colorTextButton.palette().button().color().name() + '\t'
+                roleComboBox = cast(MyQComboBox, self.eventbuttontable.cellWidget(r,9))
+                clipboard += roleComboBox.currentText() + '\n'
         # copy to the system clipboard
         sys_clip = QApplication.clipboard()
         if sys_clip is not None:
@@ -3003,6 +3051,8 @@ class EventsDlg(ArtisanResizeablDialog):
         self.aw.extraeventbuttoncolor     = ['#808080'] * maxButton
         #Text Color
         self.aw.extraeventbuttontextcolor = ['white'] * maxButton
+        #Layout roles: 0=button, 1=spacer, 2=row_break
+        self.aw.extraeventslayoutroles    = [0] * maxButton
 
         #Sorting buttons based on the visualRow
         for i in range(maxButton):
@@ -3026,6 +3076,8 @@ class EventsDlg(ArtisanResizeablDialog):
             self.aw.extraeventbuttoncolor[visualIndex]     = self.extraeventbuttoncolor[i]
             #Text Color
             self.aw.extraeventbuttontextcolor[visualIndex] = self.extraeventbuttontextcolor[i]
+            #Layout role
+            self.aw.extraeventslayoutroles[visualIndex]    = self.extraeventslayoutroles[i] if i < len(self.extraeventslayoutroles) else 0
 
         #Apply Event Button Changes
         self.aw.update_extraeventbuttons_visibility()
@@ -3128,6 +3180,15 @@ class EventsDlg(ArtisanResizeablDialog):
             if i < len(self.extraeventsvisibility):
                 self.extraeventsvisibility[i] = visibilityComboBox.currentIndex()
 
+    @pyqtSlot(int)
+    def setroleeventbutton(self, _:int) -> None:
+        i = self.aw.findWidgetsRow(self.eventbuttontable, self.sender(), 9)
+        if i is not None:
+            roleComboBox = cast(MyQComboBox, self.eventbuttontable.cellWidget(i, 9))
+            role = roleComboBox.currentData()
+            if role is not None and i < len(self.extraeventslayoutroles):
+                self.extraeventslayoutroles[i] = min(2, max(0, int(role)))
+
     @pyqtSlot(bool)
     def setbuttoncolor(self, _:bool = False) -> None:
         i = self.aw.findWidgetsRow(self.eventbuttontable,self.sender(),7)
@@ -3218,6 +3279,8 @@ class EventsDlg(ArtisanResizeablDialog):
             self.extraeventsvisibility.pop(bindex)
             self.extraeventbuttoncolor.pop(bindex)
             self.extraeventbuttontextcolor.pop(bindex)
+            if bindex < len(self.extraeventslayoutroles):
+                self.extraeventslayoutroles.pop(bindex)
 
             self.createEventbuttonTable()
 
@@ -3228,6 +3291,46 @@ class EventsDlg(ArtisanResizeablDialog):
     @pyqtSlot(bool)
     def insertextraeventbuttonSlot(self, _:bool = False) -> None:
         self.insertextraeventbutton(True)
+
+    @pyqtSlot(bool)
+    def insertSpacerSlot(self, _:bool = False) -> None:
+        if len(self.extraeventstypes) >= self.aw.buttonlistmaxlen * self.aw.max_palettes:
+            return
+        bindex = len(self.extraeventstypes)
+        selected = self.eventbuttontable.selectedRanges()
+        if len(selected) > 0:
+            bindex = selected[0].topRow()
+        self.extraeventslabels.insert(bindex, '(spacer)')
+        self.extraeventsdescriptions.insert(bindex, '')
+        self.extraeventstypes.insert(bindex, 4)
+        self.extraeventsvalues.insert(bindex, 20.0)  # spacer width px
+        self.extraeventsactions.insert(bindex, 0)
+        self.extraeventsactionstrings.insert(bindex, '')
+        self.extraeventsvisibility.insert(bindex, 1)
+        self.extraeventbuttoncolor.insert(bindex, '#808080')
+        self.extraeventbuttontextcolor.insert(bindex, 'white')
+        self.extraeventslayoutroles.insert(bindex, 1)  # spacer
+        self.createEventbuttonTable()
+
+    @pyqtSlot(bool)
+    def insertRowBreakSlot(self, _:bool = False) -> None:
+        if len(self.extraeventstypes) >= self.aw.buttonlistmaxlen * self.aw.max_palettes:
+            return
+        bindex = len(self.extraeventstypes)
+        selected = self.eventbuttontable.selectedRanges()
+        if len(selected) > 0:
+            bindex = selected[0].topRow()
+        self.extraeventslabels.insert(bindex, '(row break)')
+        self.extraeventsdescriptions.insert(bindex, '')
+        self.extraeventstypes.insert(bindex, 4)
+        self.extraeventsvalues.insert(bindex, 0.)
+        self.extraeventsactions.insert(bindex, 0)
+        self.extraeventsactionstrings.insert(bindex, '')
+        self.extraeventsvisibility.insert(bindex, 1)
+        self.extraeventbuttoncolor.insert(bindex, '#808080')
+        self.extraeventbuttontextcolor.insert(bindex, 'white')
+        self.extraeventslayoutroles.insert(bindex, 2)  # row_break
+        self.createEventbuttonTable()
 
     def insertextraeventbutton(self, insert:bool = False) -> None:
         if len(self.extraeventstypes) >= self.aw.buttonlistmaxlen * self.aw.max_palettes: # max 10 rows of buttons of buttonlistmaxlen
@@ -3277,6 +3380,7 @@ class EventsDlg(ArtisanResizeablDialog):
             self.extraeventsvalues.insert(bindex,event_value)
             self.extraeventsactions.insert(bindex,event_action)
             self.extraeventsactionstrings.insert(bindex,event_string)
+            self.extraeventslayoutroles.insert(bindex, 0)
             self.extraeventsvisibility.insert(bindex,event_visibility)
             self.extraeventbuttoncolor.insert(bindex,event_buttoncolor)
             self.extraeventbuttontextcolor.insert(bindex,event_textcolor)
@@ -3438,7 +3542,10 @@ class EventsDlg(ArtisanResizeablDialog):
         if mode in ('dock_left', 'dock_bottom', 'embedded'):
             self.aw.eventsliderContainerMode = mode
             self.aw.eventsliderDockPosition = 'bottom' if mode == 'dock_bottom' else 'left'
-            self.aw.applyEventSliderContainerMode()
+        layout_mode = self.sliderLayoutModeComboBox.currentData()
+        if layout_mode in ('auto', 'vertical', 'horizontal'):
+            self.aw.eventsliderLayoutMode = layout_mode
+        self.aw.applyEventSliderContainerMode()
 
     def saveQuantifierSettings(self) -> None:
         self.aw.clusterEventsFlag = bool(self.clusterEventsFlag.isChecked())
@@ -3512,6 +3619,7 @@ class EventsDlg(ArtisanResizeablDialog):
         self.markTPFlagstored = self.aw.qmc.markTPflag
         self.eventsliderKeyboardControlstored = self.aw.eventsliderKeyboardControl
         self.eventsliderAlternativeLayoutstored = self.aw.eventsliderAlternativeLayout
+        self.eventsliderLayoutModestored = getattr(self.aw, 'eventsliderLayoutMode', 'auto')
         # buttons
         self.extraeventslabels = self.aw.extraeventslabels[:]
         self.extraeventsdescriptions = self.aw.extraeventsdescriptions[:]
@@ -3522,6 +3630,11 @@ class EventsDlg(ArtisanResizeablDialog):
         self.extraeventsvisibility = self.aw.extraeventsvisibility[:]
         self.extraeventbuttoncolor = self.aw.extraeventbuttoncolor[:]
         self.extraeventbuttontextcolor = self.aw.extraeventbuttontextcolor[:]
+        roles = getattr(self.aw, 'extraeventslayoutroles', [])
+        n = len(self.aw.extraeventstypes)
+        if len(roles) != n:
+            roles = [roles[i] if i < len(roles) else 0 for i in range(n)] if n else []
+        self.extraeventslayoutroles = roles[:]
         self.buttonlistmaxlen = self.aw.buttonlistmaxlen
         # sliders
         self.eventslidervisibilities = self.aw.eventslidervisibilities[:]
@@ -3590,6 +3703,8 @@ class EventsDlg(ArtisanResizeablDialog):
         self.aw.qmc.markTPflag = self.markTPFlagstored
         self.aw.eventsliderKeyboardControl = self.eventsliderKeyboardControlstored
         self.aw.eventsliderAlternativeLayout = self.eventsliderAlternativeLayoutstored
+        self.aw.eventsliderLayoutMode = self.eventsliderLayoutModestored
+        self.aw.applyEventSliderLayout()
         # buttons saved only if ok is pressed, so no restore needed
         self.aw.buttonlistmaxlen = self.buttonlistmaxlen
         # sliders

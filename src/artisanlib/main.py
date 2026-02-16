@@ -1463,9 +1463,9 @@ class ApplicationWindow(QMainWindow):
         'mugmaHost','mugmaPort', 'mugma', 'mugma_default_host', 'shelly_3EMPro_host', 'shelly_PlusPlug_host',
         'kaleido_default_host', 'kaleidoHost', 'kaleidoPort', 'kaleidoSerial', 'kaleidoPID', 'kaleido', 'kaleidoEventFlags', 'colorTrack_mean_window_size', 'colorTrack_median_window_size', 'ikawa',
         'lcdpaletteB', 'lcdpaletteF', 'extraeventsbuttonsflags', 'extraeventslabels', 'extraeventbuttoncolor', 'extraeventsactionstrings',
-        'extraeventbuttonround', 'block_quantification_sampling_ticks', 'sampling_seconds_to_block_quantifiction', 'sampling_ticks_to_block_quantifiction', 'extraeventsactionslastvalue',
+        'extraeventbuttonround', 'extraeventslayoutroles', 'block_quantification_sampling_ticks', 'sampling_seconds_to_block_quantifiction', 'sampling_ticks_to_block_quantifiction', 'extraeventsactionslastvalue',
         'org_extradevicesettings', 'eventslidervalues', 'eventslidervisibilities', 'eventsliderKeyboardControl', 'eventsliderAlternativeLayout_default',
-        'eventsliderAlternativeLayout', 'eventsliderDockPosition', 'eventsliderContainerMode', 'eventslideractions', 'eventslidercommands', 'eventslideroffsets',
+        'eventsliderAlternativeLayout', 'eventsliderDockPosition', 'eventsliderContainerMode', 'eventsliderLayoutMode', 'eventslideractions', 'eventslidercommands', 'eventslideroffsets',
         'eventsliderfactors', 'eventslidermin', 'eventsMaxValue', 'eventslidermax', 'eventslidersflags', 'eventsliderBernoulli', 'eventslidercoarse',
         'eventslidertemp', 'eventsliderunits', 'eventslidermoved', 'SVslidermoved', 'eventquantifieractive', 'eventquantifiersource', 'eventquantifierSV',
         'eventquantifiermin', 'eventquantifiermax', 'eventquantifiercoarse', 'eventquantifieraction', 'clusterEventsFlag', 'eventquantifierlinspaces',
@@ -1511,7 +1511,7 @@ class ApplicationWindow(QMainWindow):
         'buttonpalette', 'extraeventbuttontextcolor', 'extraeventsactions', 'extraeventsdescriptions', 'extraeventstypes', 'extraeventsvalues',
         'extraeventsvisibility', 'fileSaveAsAction', 'keyboardButtonStyles', 'language_menu_actions', 'loadThemeAction', 'main_button_min_width_str',
         'minieventleft', 'minieventright', 'notificationManager', 'notificationsflag', 'ntb', 'pdf_page_layout', 'pdf_rendering', 'productionPDFAction',
-        'rankingPDFAction', 'roastReportMenu', 'roastReportPDFAction', 'saveAsThemeAction', 'sliderGrp12', 'sliderGrp34', 'sliderGrpBox1x', 'sliderGrpBox2x', 'sliderGrpBox3x', 'sliderGrpBox4x',
+        'rankingPDFAction', 'roastReportMenu', 'roastReportPDFAction', 'saveAsThemeAction', 'sliderGrp12', 'sliderGrp34', 'sliderGrpSV_layout', 'sliderGrpBox1x', 'sliderGrpBox2x', 'sliderGrpBox3x', 'sliderGrpBox4x',
         'small_button_min_width_str', 'standard_button_min_width_px', 'tiny_button_min_width_str', 'recording_version', 'recording_revision', 'recording_build',
         'lastIOResult', 'lastArtisanResult', 'max_palettes', 'palette_entries', 'eventsliders', 'defaultSettings', 'zoomInShortcut', 'zoomOutShortcut',
         'summarystatstypes_default', 'summarystatstypes','summarystats_startup', 'summarystatsfontsize', 'bbp_total_time','bbp_bottom_temp','bbp_begin_to_bottom_time','bbp_bottom_to_charge_time',
@@ -1908,6 +1908,8 @@ class ApplicationWindow(QMainWindow):
         #   3: rounded on both sides
         self.extraeventbuttonround:list[int] = [] # set by realignbuttons on rendering the button rows and read by setExtraEventButtonStyle to update the style
         self.extraeventbuttonsCompactLayout:bool = False  # if True, only visible buttons in layout, left-aligned, no invisible gaps
+        # Layout role per button record: 0=button, 1=spacer, 2=row_break. Same length as extraeventstypes; missing/legacy => zeros.
+        self.extraeventslayoutroles:list[int] = []
 
         # quantification is blocked if lock_quantification_sampling_ticks is not 0
         # (eg. after a change of the event value by button or slider actions as the machine, like a Probat might need some seconds to slowly
@@ -1930,6 +1932,7 @@ class ApplicationWindow(QMainWindow):
         self.eventsliderAlternativeLayout:bool = self.eventsliderAlternativeLayout_default
         self.eventsliderDockPosition:str = 'left'  # 'left'|'bottom' (legacy, migrated to eventsliderContainerMode)
         self.eventsliderContainerMode:str = 'dock_left'  # 'dock_left'|'dock_bottom'|'embedded'
+        self.eventsliderLayoutMode:str = 'auto'  # 'auto'|'vertical'|'horizontal' (sliders layout/orientation)
         self.eventslideractions:list[int] = [0]*self.eventsliders # 0: None, 1: Serial Command, 2: Modbus Command, 3: DTA Command, 4: Call Program, 5: Hottop Heater, 6: Hottop Fan
         self.eventslidercommands:list[str] = ['']*self.eventsliders
         self.eventslideroffsets:list[float] = [0.0]*self.eventsliders
@@ -3554,7 +3557,7 @@ class ApplicationWindow(QMainWindow):
         self.buttonpalette_label:str = self.buttonpalette_default_label
         #10 palettes of buttons
         self.max_palettes:Final[int] = 10                # number of supported palettes
-        self.palette_entries:Final[int] = 28
+        self.palette_entries:Final[int] = 29  # was 28; index 28 = extraeventslayoutroles
         self.buttonpalette:list[Palette] = [] # a list of Palettes, either valid, paletteValid(p), or empty, generated by makePalette(empty=True)
         for _ in range(self.max_palettes):
             self.buttonpalette.append(self.makePalette())
@@ -4176,17 +4179,17 @@ class ApplicationWindow(QMainWindow):
         self.sliderGrp34.setContentsMargins(0,0,0,0)
         self.sliderGrp34.addLayout(self.sliderGrpBox3x)
         self.sliderGrp34.addLayout(self.sliderGrpBox4x)
-        sliderGrpSV = QVBoxLayout()
-        sliderGrpSV.setSpacing(0)
-        sliderGrpSV.setContentsMargins(0,0,0,0)
-        sliderGrpSV.addWidget(self.sliderGrpBoxSV)
+        self.sliderGrpSV_layout = QVBoxLayout()
+        self.sliderGrpSV_layout.setSpacing(0)
+        self.sliderGrpSV_layout.setContentsMargins(0,0,0,0)
+        self.sliderGrpSV_layout.addWidget(self.sliderGrpBoxSV)
 
         self.leftlayout:QHBoxLayout = QHBoxLayout()
         self.leftlayout.setSpacing(0)
         self.leftlayout.setContentsMargins(0,0,0,0)
         self.leftlayout.addLayout(self.sliderGrp12)
         self.leftlayout.addLayout(self.sliderGrp34)
-        self.leftlayout.addLayout(sliderGrpSV)
+        self.leftlayout.addLayout(self.sliderGrpSV_layout)
 
         self.sliderFrame:QFrame = QFrame()
         self.sliderFrame.setLayout(self.leftlayout)
@@ -6406,33 +6409,41 @@ class ApplicationWindow(QMainWindow):
         self.lcd7.setStyleSheet(f"QLCDNumber {{ border-radius: 4; color: {rgba_colorname2argb_colorname(self.lcdpaletteF['sv'])}; background-color: {rgba_colorname2argb_colorname(self.lcdpaletteB['sv'])};}}")
         self.updateLCDproperties()
 
+    def _applySliderVerticalOrder(self, alternativeLayout:bool) -> None:
+        """Reorder *x layouts inside sliderGrp12/sliderGrp34 (vertical mode only). Does not call applyEventSliderLayout."""
+        if alternativeLayout:
+            self.sliderGrp12.removeItem(self.sliderGrpBox1x)
+            self.sliderGrp12.removeItem(self.sliderGrpBox4x)
+            self.sliderGrp34.removeItem(self.sliderGrpBox2x)
+            self.sliderGrp34.removeItem(self.sliderGrpBox3x)
+            self.sliderGrp12.addLayout(self.sliderGrpBox1x)
+            self.sliderGrp12.addLayout(self.sliderGrpBox4x)
+            self.sliderGrp34.addLayout(self.sliderGrpBox2x)
+            self.sliderGrp34.addLayout(self.sliderGrpBox3x)
+        else:
+            self.sliderGrp12.removeItem(self.sliderGrpBox1x)
+            self.sliderGrp12.removeItem(self.sliderGrpBox2x)
+            self.sliderGrp34.removeItem(self.sliderGrpBox3x)
+            self.sliderGrp34.removeItem(self.sliderGrpBox4x)
+            self.sliderGrp12.addLayout(self.sliderGrpBox1x)
+            self.sliderGrp12.addLayout(self.sliderGrpBox2x)
+            self.sliderGrp34.addLayout(self.sliderGrpBox3x)
+            self.sliderGrp34.addLayout(self.sliderGrpBox4x)
+
     # switches slider layout to its alternative layout if 'alternativeLayout' is True,
-    # other wise to standard layout
+    # otherwise to standard layout
     def updateSliderLayout(self, alternativeLayout:bool) -> None:
-        if alternativeLayout != self.eventsliderAlternativeLayout:
-            if self.eventsliderAlternativeLayout: # we activate standard layout
-                # remove alternative layout sliders
-                self.sliderGrp12.removeItem(self.sliderGrpBox1x)
-                self.sliderGrp12.removeItem(self.sliderGrpBox4x)
-                self.sliderGrp34.removeItem(self.sliderGrpBox2x)
-                self.sliderGrp34.removeItem(self.sliderGrpBox3x)
-                # add standard layout sliders
-                self.sliderGrp12.addLayout(self.sliderGrpBox1x)
-                self.sliderGrp12.addLayout(self.sliderGrpBox2x)
-                self.sliderGrp34.addLayout(self.sliderGrpBox3x)
-                self.sliderGrp34.addLayout(self.sliderGrpBox4x)
-            else: # we activate alternative layout
-                # remove standard layout sliders
-                self.sliderGrp12.removeItem(self.sliderGrpBox1x)
-                self.sliderGrp12.removeItem(self.sliderGrpBox2x)
-                self.sliderGrp34.removeItem(self.sliderGrpBox3x)
-                self.sliderGrp34.removeItem(self.sliderGrpBox4x)
-                # add alternative layout sliders
-                self.sliderGrp12.addLayout(self.sliderGrpBox1x)
-                self.sliderGrp12.addLayout(self.sliderGrpBox4x)
-                self.sliderGrp34.addLayout(self.sliderGrpBox2x)
-                self.sliderGrp34.addLayout(self.sliderGrpBox3x)
+        layout_mode = getattr(self, 'eventsliderLayoutMode', 'auto')
+        container = getattr(self, 'eventsliderContainerMode', 'dock_left')
+        effective = ('vertical' if container == 'dock_left' else 'horizontal') if layout_mode == 'auto' else layout_mode
+        if effective == 'horizontal':
             self.eventsliderAlternativeLayout = alternativeLayout
+            self.applyEventSliderLayout()
+            return
+        if alternativeLayout != self.eventsliderAlternativeLayout:
+            self._applySliderVerticalOrder(alternativeLayout)
+            self.eventsliderAlternativeLayout = alternativeLayout
+        self.applyEventSliderLayout()
 
     # True if background color is light, otherwise false
     @functools.cached_property
@@ -11861,8 +11872,146 @@ class ApplicationWindow(QMainWindow):
                 self.removeDockWidget(self.sliderDock)
                 self.addDockWidget(area, self.sliderDock)
                 self.sliderDock.setVisible(self.slidersVisible())
+            self.applyEventSliderLayout()
         except Exception as e: # pylint: disable=broad-except
             _log.exception(e)
+
+    def _clearSliderFrameLayout(self) -> None:
+        """Remove all items from leftlayout without deleting child widgets/layouts."""
+        while self.leftlayout.count():
+            self.leftlayout.takeAt(0)
+
+    def applyEventSliderLayout(self) -> None:
+        """Apply slider layout: vertical (legacy two columns + SV) or horizontal (one row). Sets sizes and structure."""
+        layout_mode = getattr(self, 'eventsliderLayoutMode', 'auto')
+        container = getattr(self, 'eventsliderContainerMode', 'dock_left')
+        if layout_mode == 'auto':
+            effective = 'vertical' if container == 'dock_left' else 'horizontal'
+        else:
+            effective = layout_mode  # 'vertical' or 'horizontal'
+
+        alt = getattr(self, 'eventsliderAlternativeLayout', False)
+        order: list[int] = [1, 4, 2, 3] if alt else [1, 2, 3, 4]
+        sv_enabled = bool(getattr(self.pidcontrol, 'svSlider', False))
+
+        sliders = (self.slider1, self.slider2, self.slider3, self.slider4, self.sliderSV)
+        grp_boxes = (self.sliderGrpBox1, self.sliderGrpBox2, self.sliderGrpBox3, self.sliderGrpBox4, self.sliderGrpBoxSV)
+        grp_x_layouts = (self.sliderGrpBox1x, self.sliderGrpBox2x, self.sliderGrpBox3x, self.sliderGrpBox4x)
+
+        if effective == 'vertical':
+            # If currently horizontal (leftlayout has widgets), take them and put back into *x layouts
+            # Layout can be temporarily empty during re-parenting (e.g. sliderFrame dock <-> embedded).
+            first_item = self.leftlayout.itemAt(0) if self.leftlayout.count() else None
+            if first_item is not None and first_item.widget() is not None:
+                ordered_widgets: list[Any] = []
+                while self.leftlayout.count():
+                    item = self.leftlayout.takeAt(0)
+                    if item is not None and item.widget() is not None:
+                        ordered_widgets.append(item.widget())
+                inv = [order.index(1), order.index(2), order.index(3), order.index(4)]
+                for j in range(4):
+                    grp_x_layouts[j].addWidget(ordered_widgets[inv[j]])
+                if len(ordered_widgets) > 4:
+                    self.sliderGrpSV_layout.addWidget(ordered_widgets[4])
+            if self.leftlayout.count() == 0:
+                self.leftlayout.addLayout(self.sliderGrp12)
+                self.leftlayout.addLayout(self.sliderGrp34)
+                self.leftlayout.addLayout(self.sliderGrpSV_layout)
+            # Ensure 1+2/3+4 vs 1+4/2+3 order (reorder *x inside sliderGrp12/34 without re-entering applyEventSliderLayout)
+            self._applySliderVerticalOrder(self.eventsliderAlternativeLayout)
+
+            for s in sliders:
+                s.setOrientation(Qt.Orientation.Vertical)
+            for g in grp_boxes:
+                g.setMinimumWidth(55)
+                g.setMaximumWidth(55)
+            for s in (self.slider1, self.slider2, self.slider3, self.slider4):
+                s.setMinimumWidth(50)
+                s.setMaximumWidth(50)
+            self.sliderSV.setMinimumWidth(50)
+            self.sliderSV.setMaximumWidth(50)
+            self.sliderFrame.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Ignored)
+            self.sliderFrame.setMinimumHeight(0)
+            self.sliderDock.setMinimumHeight(0)
+        else:
+            # Horizontal row: get group box widgets (from leftlayout if already horizontal, else from *x and SV layouts)
+            # Layout can be temporarily empty during re-parenting (e.g. sliderFrame dock <-> embedded).
+            collected: list[Any] = []
+            while self.leftlayout.count():
+                item = self.leftlayout.takeAt(0)
+                if item is not None and item.widget() is not None:
+                    collected.append(item.widget())
+            if len(collected) >= 4:
+                inv = [order.index(1), order.index(2), order.index(3), order.index(4)]
+                boxes_list = [collected[inv[j]] for j in range(4)]
+                sv_box = collected[4] if len(collected) > 4 else grp_boxes[4]
+            else:
+                # Step-by-step extraction with None checks; fallback to grp_boxes if layout is empty.
+                def _widget_from_grp_layout(grp_layout: QLayout, index: int, fallback: QWidget) -> Any:
+                    it = grp_layout.itemAt(index) if grp_layout else None
+                    if it is None or it.layout() is None:
+                        return fallback
+                    ly = it.layout()
+                    if ly.count() == 0:
+                        return fallback
+                    first = ly.itemAt(0)
+                    if first is None or first.widget() is None:
+                        return fallback
+                    taken = ly.takeAt(0)
+                    if taken is None or taken.widget() is None:
+                        return fallback
+                    return taken.widget()
+                def _sv_widget_from_layout(fallback: QWidget) -> Any:
+                    if self.sliderGrpSV_layout.count() == 0:
+                        return fallback
+                    taken = self.sliderGrpSV_layout.takeAt(0)
+                    if taken is None or taken.widget() is None:
+                        return fallback
+                    return taken.widget()
+                boxes_list = [
+                    _widget_from_grp_layout(self.sliderGrp12, 0, grp_boxes[0]),
+                    _widget_from_grp_layout(self.sliderGrp12, 1, grp_boxes[1]),
+                    _widget_from_grp_layout(self.sliderGrp34, 0, grp_boxes[2]),
+                    _widget_from_grp_layout(self.sliderGrp34, 1, grp_boxes[3]),
+                ]
+                sv_box = _sv_widget_from_layout(grp_boxes[4])
+            ordered = [boxes_list[order[i] - 1] for i in range(4)]
+            if sv_enabled:
+                ordered.append(sv_box)
+            for w in ordered:
+                self.leftlayout.addWidget(w)
+            self.leftlayout.addStretch(1)
+
+            for s in sliders:
+                s.setOrientation(Qt.Orientation.Horizontal)
+            for g in grp_boxes:
+                g.setMinimumWidth(120)
+                g.setMaximumWidth(16777215)
+            for s in (self.slider1, self.slider2, self.slider3, self.slider4):
+                s.setMinimumWidth(120)
+                s.setMaximumWidth(16777215)
+            self.sliderSV.setMinimumWidth(120)
+            self.sliderSV.setMaximumWidth(16777215)
+            self.sliderFrame.setMinimumHeight(110)
+            self.sliderFrame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            if container == 'dock_bottom':
+                self.sliderDock.setMinimumHeight(110)
+            else:
+                self.sliderDock.setMinimumHeight(0)
+
+        self.updateSlidersVisibility()
+
+        try:
+            from artisanlib.canvas import _ROAST_DEBUG_ENABLED, _roast_debug_log_json
+            if _ROAST_DEBUG_ENABLED:
+                _roast_debug_log_json({
+                    'event': 'eventslider_layout_applied',
+                    'mode': layout_mode,
+                    'container': container,
+                    'effective_layout': effective,
+                })
+        except Exception:  # pylint: disable=broad-except
+            pass
 
     def _slidersUIVisible(self) -> bool:
         """True if the slider UI (dock or embedded frame) is currently visible."""
@@ -19277,6 +19426,14 @@ class ApplicationWindow(QMainWindow):
                 self._apply_slider_container_after_restore = True
             else:
                 self._apply_slider_container_after_restore = False
+            if settings.contains('eventsliderLayoutMode'):
+                lm = str(settings.value('eventsliderLayoutMode', 'auto'))
+                if lm in ('auto', 'vertical', 'horizontal'):
+                    self.eventsliderLayoutMode = lm
+                else:
+                    self.eventsliderLayoutMode = 'auto'
+            else:
+                self.eventsliderLayoutMode = 'auto'
             self._eventsBottomHSplitterState = settings.value('eventsBottomHSplitterState')  # QByteArray or None
             settings.endGroup()
             self.qmc.adjustTempSliders() # adjust min/max slider limits of temperature sliders to correspond to the current temp mode
@@ -19510,6 +19667,18 @@ class ApplicationWindow(QMainWindow):
                     self.extraeventsdescriptions = extraeventsdescriptions
                     self.extraeventbuttoncolor = extraeventbuttoncolor
                     self.extraeventbuttontextcolor = extraeventbuttontextcolor
+                    if settings.contains('extraeventslayoutroles'):
+                        extraeventslayoutroles = [min(2, max(0, toInt(x))) for x in toList(settings.value('extraeventslayoutroles', []))]
+                        if len(extraeventslayoutroles) == len(extraeventstypes):
+                            self.extraeventslayoutroles = extraeventslayoutroles
+                        else:
+                            self.extraeventslayoutroles = [0] * len(extraeventstypes)
+                    else:
+                        self.extraeventslayoutroles = [0] * len(extraeventstypes)
+                    # Migrate legacy hidden placeholders to Spacer/Row break when roles were missing or all zeros
+                    roles_key_missing = not settings.contains('extraeventslayoutroles')
+                    if roles_key_missing or all(r == 0 for r in self.extraeventslayoutroles):
+                        self._migrate_legacy_hidden_buttons_to_roles_if_needed('qsettings_load')
                 self.buttonpalettemaxlen = [min(self.buttonpalettemaxlen_max,max(self.buttonpalettemaxlen_min,toInt(x))) for x in toList(settings.value('buttonpalettemaxlen',self.buttonpalettemaxlen))]
                 self.buttonpalette_buttonsize = [min(2,max(0,toInt(x))) for x in toList(settings.value('buttonpalette_buttonsize',self.buttonpalette_buttonsize))]
                 self.buttonpalette_mark_last_button_pressed = [toBool(x) for x in toList(settings.value('buttonpalette_mark_last_button_pressed',self.buttonpalette_mark_last_button_pressed))]
@@ -19531,9 +19700,17 @@ class ApplicationWindow(QMainWindow):
                                 self.buttonpalette.append(tp)
                             else:
                                 self.buttonpalette.append(self.makePalette())
+                        elif len(p) == 28:
+                            # legacy palette without layout roles: extend with zeros
+                            roles = [0] * len(p[0]) if p[0] else []
+                            tp = cast('Palette', tuple(list(p) + [roles]))
+                            self.buttonpalette.append(tp)
                         else:
                             # to be compatible to older Artisan versions with smaller palettes we fill the list from the defaults and convert it into a Palette
-                            tp = cast('Palette', tuple(p + list(self.makePalette(empty=False))[len(p):]))
+                            filled = p + list(self.makePalette(empty=False))[len(p):]
+                            if len(filled) == 28:
+                                filled = filled + [[0] * len(filled[0]) if filled[0] else []]
+                            tp = cast('Palette', tuple(filled))
                             self.buttonpalette.append(tp)
                 self.buttonpalette_shortcuts = toBool(settings.value('buttonpalette_shortcuts',self.buttonpalette_shortcuts))
                 self.eventbuttontablecolumnwidths = [toInt(x) for x in toList(settings.value('eventbuttontablecolumnwidths',self.eventbuttontablecolumnwidths))]
@@ -19541,6 +19718,30 @@ class ApplicationWindow(QMainWindow):
                 self.mark_last_button_pressed = toBool(settings.value('marklastbuttonpressed',self.mark_last_button_pressed))
                 self.show_extrabutton_tooltips = toBool(settings.value('showextrabuttontooltips',self.show_extrabutton_tooltips))
                 self.buttonpalette_label = toString(settings.value('buttonpalette_label',self.buttonpalette_label))
+                # Optionally migrate stored palettes that have all-zero roles (mutates p[28] and p[1] in place)
+                for pindex, p in enumerate(self.buttonpalette):
+                    if len(p) == 29 and len(p[0]) > 0 and all(r == 0 for r in p[28]):
+                        roles_list = list(p[28])  # mutate a copy then replace palette so tuple stays valid
+                        changed_p, cs, cr, uv = self._migrate_roles_on_arrays(
+                            p[0], p[1], p[3], p[5], p[6], p[4], p[2], roles_list,
+                        )
+                        if changed_p:
+                            self.buttonpalette[pindex] = tuple(list(p)[:28] + [roles_list])
+                            try:
+                                from artisanlib.canvas import _ROAST_DEBUG_ENABLED, _roast_debug_log_json
+                                if _ROAST_DEBUG_ENABLED:
+                                    _roast_debug_log_json({
+                                        'event': 'extraevent_roles_migrated',
+                                        'source': 'palette_list',
+                                        'palette_index': pindex,
+                                        'total_items': len(p[0]),
+                                        'converted_spacers': len(cs),
+                                        'converted_rowbreaks': len(cr),
+                                        'updated_values_count': uv,
+                                        'sample_indices': (cs + cr)[:10],
+                                    })
+                            except Exception:  # pylint: disable=broad-except
+                                pass
             settings.endGroup()
 #--- END GROUP ExtraEventButtons
 
@@ -21163,6 +21364,7 @@ class ApplicationWindow(QMainWindow):
             self.settingsSetValue(settings, default_settings, 'extraeventsactions',self.extraeventsactions, read_defaults)
             self.settingsSetValue(settings, default_settings, 'extraeventsdescriptions',self.extraeventsdescriptions, read_defaults)
             self.settingsSetValue(settings, default_settings, 'extraeventsvisibility',self.extraeventsvisibility, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'extraeventslayoutroles',getattr(self, 'extraeventslayoutroles', [0]*len(self.extraeventstypes)), read_defaults)
             self.settingsSetValue(settings, default_settings, 'extraeventslabels',self.extraeventslabels, read_defaults)
             self.settingsSetValue(settings, default_settings, 'extraeventbuttoncolor',self.extraeventbuttoncolor, read_defaults)
             self.settingsSetValue(settings, default_settings, 'extraeventbuttontextcolor',self.extraeventbuttontextcolor, read_defaults)
@@ -21207,6 +21409,7 @@ class ApplicationWindow(QMainWindow):
             self.settingsSetValue(settings, default_settings, 'eventsliderKeyboardControl',self.eventsliderKeyboardControl, read_defaults)
             self.settingsSetValue(settings, default_settings, 'eventsliderAlternativeLayout',self.eventsliderAlternativeLayout, read_defaults)
             self.settingsSetValue(settings, default_settings, 'eventsliderContainerMode',self.eventsliderContainerMode, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'eventsliderLayoutMode',getattr(self, 'eventsliderLayoutMode', 'auto'), read_defaults)
             self.settingsSetValue(settings, default_settings, 'eventsliderDockPosition','bottom' if self.eventsliderContainerMode == 'dock_bottom' else 'left', read_defaults)
             if getattr(self, 'eventsliderContainerMode', 'dock_left') == 'embedded':
                 self.settingsSetValue(settings, default_settings, 'eventsBottomHSplitterState',self.eventsBottomHSplitter.saveState(), read_defaults)
@@ -26694,10 +26897,121 @@ class ApplicationWindow(QMainWindow):
             res = res.replace(var,subst)
         return res
 
+    def _migrate_roles_on_arrays(
+        self,
+        types: list[int],
+        values: list[float],
+        visibility: list[int],
+        labels: list[str],
+        descriptions: list[str],
+        actionstrings: list[str],
+        actions: list[int],
+        roles: list[int],
+    ) -> tuple[bool, list[int], list[int], int]:
+        """Run legacy placeholder migration on given arrays. Mutates roles and values in place.
+        Returns (changed, converted_spacers, converted_rowbreaks, updated_values_count)."""
+        import string
+        n = len(types)
+        if n == 0:
+            return False, [], [], 0
+        if len(roles) != n:
+            roles[:] = [roles[i] if i < len(roles) else 0 for i in range(n)]
+        rowbreak_whitelist = frozenset({'\\N', 'BR', 'ROW', 'ROW BREAK', 'ROWBREAK', '|', 'NEWLINE', 'LF'})
+        spacer_tokens = frozenset({'', ' ', '-', '--', '…', '.', '·'})
+
+        def is_spacer_token(norm: str) -> bool:
+            if norm in spacer_tokens:
+                return True
+            if len(norm) <= 2 and norm:
+                return all((c in string.punctuation) or (c in ' \t\-–—') for c in norm)
+            return False
+
+        converted_spacers: list[int] = []
+        converted_rowbreaks: list[int] = []
+        updated_values_count = 0
+        changed = False
+
+        for i in range(n):
+            if visibility[i] != 0:
+                continue
+            etype = types[i] if i < len(types) else 4
+            if etype != 4:
+                continue
+            norm_label = (labels[i] if i < len(labels) else '' or '').strip()
+            norm_label_for_upper = norm_label.replace('\n', '\\N')
+            norm_upper = norm_label_for_upper.upper()
+            desc = (descriptions[i] if i < len(descriptions) else '' or '').strip()
+            cmd = (actionstrings[i] if i < len(actionstrings) else '' or '').strip()
+            action_idx = actions[i] if i < len(actions) else 0
+            if desc != '' or cmd != '' or action_idx != 0:
+                continue
+
+            if norm_upper in rowbreak_whitelist:
+                if roles[i] != 2:
+                    roles[i] = 2
+                    converted_rowbreaks.append(i)
+                    changed = True
+            elif is_spacer_token(norm_label):
+                if roles[i] != 1:
+                    roles[i] = 1
+                    converted_spacers.append(i)
+                    changed = True
+                val = values[i] if i < len(values) else 0
+                if val is None or (isinstance(val, (int, float)) and val <= 0):
+                    values[i] = 20.0
+                    updated_values_count += 1
+                    changed = True
+
+        return changed, converted_spacers, converted_rowbreaks, updated_values_count
+
+    def _migrate_legacy_hidden_buttons_to_roles_if_needed(self, source: str) -> bool:
+        """Migrate legacy hidden placeholder buttons (visibility==0) to Spacer/Row break roles.
+        Only converts entries that look like layout placeholders; real hidden buttons stay role=0.
+        Returns True if any role or value was changed."""
+        n = len(self.extraeventstypes)
+        if n == 0:
+            return False
+        roles = getattr(self, 'extraeventslayoutroles', [])
+        if len(roles) != n:
+            roles = [roles[i] if i < len(roles) else 0 for i in range(n)]
+        changed, converted_spacers, converted_rowbreaks, updated_values_count = self._migrate_roles_on_arrays(
+            self.extraeventstypes,
+            self.extraeventsvalues,
+            self.extraeventsvisibility,
+            self.extraeventslabels,
+            self.extraeventsdescriptions,
+            self.extraeventsactionstrings,
+            self.extraeventsactions,
+            roles,
+        )
+        if not changed:
+            return False
+        self.extraeventslayoutroles = roles
+
+        try:
+            from artisanlib.canvas import _ROAST_DEBUG_ENABLED, _roast_debug_log_json
+            if _ROAST_DEBUG_ENABLED:
+                _roast_debug_log_json({
+                    'event': 'extraevent_roles_migrated',
+                    'source': source,
+                    'total_items': n,
+                    'converted_spacers': len(converted_spacers),
+                    'converted_rowbreaks': len(converted_rowbreaks),
+                    'updated_values_count': updated_values_count,
+                    'sample_indices': (converted_spacers + converted_rowbreaks)[:10],
+                })
+        except Exception:  # pylint: disable=broad-except
+            pass
+        return True
 
     #orders extra event buttons based on max number of buttons
     @pyqtSlot()
     def realignbuttons(self) -> None:
+        # keep layout roles in sync with button list length (legacy/missing => 0)
+        roles = getattr(self, 'extraeventslayoutroles', [])
+        n = len(self.extraeventstypes)
+        if len(roles) != n:
+            self.extraeventslayoutroles = ([roles[i] if i < len(roles) else 0 for i in range(n)] if n else [])
         #clear buttons
         self.clearBoxLayout(self.e1buttonbarLayout)
         self.clearBoxLayout(self.e2buttonbarLayout)
@@ -26749,6 +27063,9 @@ class ApplicationWindow(QMainWindow):
         ]
         visible_count = 0
         compact = getattr(self, 'extraeventbuttonsCompactLayout', False)
+        # compact layout: track row/col for role-based layout (row_break, spacer, button)
+        layout_row = 0
+        layout_col = 0
 
         # hidden buttons at the top of the table are for actions and don't count in the first row
         # find the index of the first visible button
@@ -26759,11 +27076,11 @@ class ApplicationWindow(QMainWindow):
                 break
 
         for i, eet in enumerate(self.extraeventstypes):
+            role = self.extraeventslayoutroles[i] if i < len(self.extraeventslayoutroles) else 0
             if compact:
-                if not self.extraeventsvisibility[i] or i < first_visible_idx:
-                    self.extraeventbuttonround.append(0)
-                else:
-                    pos_in_row = visible_count % self.buttonlistmaxlen
+                # round corners based on layout position (for buttons only)
+                if role == 0 and self.extraeventsvisibility[i] and i >= first_visible_idx:
+                    pos_in_row = layout_col
                     is_first = (pos_in_row == 0)
                     is_last = (pos_in_row == self.buttonlistmaxlen - 1)
                     if is_first and is_last:
@@ -26774,6 +27091,8 @@ class ApplicationWindow(QMainWindow):
                         self.extraeventbuttonround.append(2)
                     else:
                         self.extraeventbuttonround.append(0)
+                else:
+                    self.extraeventbuttonround.append(0)
             else:
                 # next button in this group is hidden
                 next_hidden = ((i - first_visible_idx)%self.buttonlistmaxlen < self.buttonlistmaxlen -1 and  # at least one more places in the group
@@ -26824,13 +27143,30 @@ class ApplicationWindow(QMainWindow):
             self.buttonStates.append(0)
             #add button to row
             if compact:
-                if i >= first_visible_idx and self.extraeventsvisibility[i]:
-                    row = visible_count // self.buttonlistmaxlen
-                    if row < 10:
-                        row_layouts[row].addWidget(self.buttonlist[i])
-                    else:
-                        _log.warning('realignbuttons: compact layout row >= 10, skipping button %s', i)
-                    visible_count += 1
+                if role == 2:  # row_break: next row, no widget
+                    layout_row += 1
+                    layout_col = 0
+                elif role == 1:  # spacer
+                    if layout_row < 10:
+                        w_px = int(self.extraeventsvalues[i]) if self.extraeventsvalues[i] > 0 else 20
+                        row_layouts[layout_row].addSpacing(w_px)
+                    layout_col += 1
+                    if layout_col >= self.buttonlistmaxlen:
+                        layout_row += 1
+                        layout_col = 0
+                    if layout_row >= 10:
+                        _log.warning('realignbuttons: compact layout row >= 10, skipping further items')
+                elif role == 0:  # button
+                    if self.extraeventsvisibility[i] and i >= first_visible_idx:
+                        if layout_row < 10:
+                            row_layouts[layout_row].addWidget(self.buttonlist[i])
+                        else:
+                            _log.warning('realignbuttons: compact layout row >= 10, skipping button %s', i)
+                        visible_count += 1
+                        layout_col += 1
+                        if layout_col >= self.buttonlistmaxlen:
+                            layout_row += 1
+                            layout_col = 0
             else:
                 if i < first_visible_idx:
                     pass
@@ -27001,6 +27337,7 @@ class ApplicationWindow(QMainWindow):
         return (len(palette) == self.palette_entries and
                 len(palette[0]) == len(palette[1]) == len(palette[2]) == len(palette[3]) == len(palette[4]) and
                 len(palette[0]) == len(palette[5]) == len(palette[6]) == len(palette[7]) == len(palette[8]) and
+                (len(palette[0]) == 0 or len(palette[0]) == len(palette[28])) and
                 self.eventsliders == len(palette[9]) == len(palette[10]) == len(palette[11]) == len(palette[12]) and
                 self.eventsliders == len(palette[13]) == len(palette[14]) == len(palette[15]) == len(palette[16]) and
                 self.eventsliders == len(palette[17]) == len(palette[18]) == len(palette[19]) == len(palette[20]) and
@@ -27023,6 +27360,12 @@ class ApplicationWindow(QMainWindow):
                 self.extraeventsdescriptions = copy[6][:]
                 self.extraeventbuttoncolor = copy[7][:]
                 self.extraeventbuttontextcolor = copy[8][:]
+                if len(copy) > 28 and len(copy[28]) == len(copy[0]):
+                    self.extraeventslayoutroles = copy[28][:]
+                else:
+                    self.extraeventslayoutroles = [0] * len(copy[0])
+                if all(r == 0 for r in self.extraeventslayoutroles):
+                    self._migrate_legacy_hidden_buttons_to_roles_if_needed('palette_apply')
                 self.eventslidervisibilities = copy[9][:]
                 self.eventslideractions = copy[10][:]
                 self.eventslidercommands = copy[11][:]
@@ -27106,7 +27449,7 @@ class ApplicationWindow(QMainWindow):
             return cast('Palette', ([], [], [], [], [], [], [], [], [], [0, 0, 0, 0], [0, 0, 0, 0],
                 ['', '', '', ''], [0, 0, 0, 0], [1.0, 1.0, 1.0, 1.0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [100, 100, 100, 100],
                 [0, 0, 0, 0], [0, 0, 0, 0], [100, 100, 100, 100], [0, 0, 0, 0], [0, 0, 0, 0], ['', '', '', ''], [0, 0, 0, 0], '',
-                [0, 0, 0, 0], [0, 0, 0, 0]))
+                [0, 0, 0, 0], [0, 0, 0, 0], []))
         return (
             self.extraeventstypes[:],
             self.extraeventsvalues[:],
@@ -27139,7 +27482,8 @@ class ApplicationWindow(QMainWindow):
             self.buttonpalette_label,
             #
             self.eventquantifieraction[:],
-            self.eventquantifierSV[:]
+            self.eventquantifierSV[:],
+            getattr(self, 'extraeventslayoutroles', [0] * len(self.extraeventstypes))[:] if len(self.extraeventstypes) else []
         )
 
 
@@ -27192,6 +27536,7 @@ class ApplicationWindow(QMainWindow):
                             #
                             slider_quantifier_action_flags = ([int(y) for y in pk[26]] if len(pk)>26 else pal[i][26][:])
                             slider_quantifier_SV_flags = ([int(y) for y in pk[27]] if len(pk)>27 else pal[i][27][:])
+                            event_button_layout_roles:list[int] = ([min(2, max(0, int(y))) for y in pk[28]] if len(pk) > 28 else [0] * len(event_button_types))
 
                             #
                             nextpalette:Palette = (
@@ -27222,7 +27567,8 @@ class ApplicationWindow(QMainWindow):
                                     slider_slider_bernoulli_flags,
                                     label,
                                     slider_quantifier_action_flags,
-                                    slider_quantifier_SV_flags)
+                                    slider_quantifier_SV_flags,
+                                    event_button_layout_roles)
                             input_pal[i] = nextpalette
                 message =QApplication.translate('Message','Palettes loaded')
                 self.sendmessage(message)
