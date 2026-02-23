@@ -15,10 +15,11 @@
 # AUTHOR
 # Marko Luther, 2023
 
+import copy
 import sys
 import platform
 import logging
-from typing import override, Final, Any, cast, TYPE_CHECKING
+from typing import override, Final, Any, cast, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from artisanlib.atypes import Palette
@@ -34,14 +35,297 @@ from artisanlib.widgets import MyQComboBox, MyQDoubleSpinBox
 from uic import SliderCalculatorDialog # pyright: ignore[attr-defined] # pylint: disable=no-name-in-module
 
 
-from PyQt6.QtCore import (Qt, pyqtSlot, QSettings, QTimer)
-from PyQt6.QtGui import (QColor, QFont, QIntValidator)
+from PyQt6.QtCore import (Qt, pyqtSlot, QSettings, QTimer, QMimeData, QByteArray)
+from PyQt6.QtGui import (QColor, QFont, QIntValidator, QDrag)
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                              QPushButton, QSpinBox, QWidget, QTabWidget, QDialogButtonBox,
-                             QGridLayout, QGroupBox, QTableWidget, QHeaderView, QToolButton)
+                             QGridLayout, QGroupBox, QTableWidget, QHeaderView, QToolButton, QListWidget,
+                             QAbstractItemView, QScrollArea, QFrame, QListWidgetItem, QInputDialog)
 
 
 _log: Final[logging.Logger] = logging.getLogger(__name__)
+
+SLIDER_DECK_MIME = 'application/x-artisan-slider-idx'
+BUTTON_ROW_MIME = 'application/x-artisan-button-idx'
+EXTRAEVENT_SLOT_MIME = 'application/x-artisan-extraevent-slot'
+NUM_BUTTON_ROWS = 10
+
+
+class SliderDeckListWidget(QListWidget):
+    """List widget for one deck zone (Left/Right/SV/Hidden). Supports DnD between siblings."""
+    def __init__(self, parent: QWidget | None, siblings: list) -> None:
+        super().__init__(parent)
+        self._siblings: list = siblings
+        self._on_drop_callback: Callable[[], None] | None = None
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDropIndicatorShown(True)
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasFormat(SLIDER_DECK_MIME):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasFormat(SLIDER_DECK_MIME):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def _remove_slider_idx_from_siblings(self, slider_idx: int) -> None:
+        for w in self._siblings:
+            if w is self:
+                continue
+            for i in range(w.count() - 1, -1, -1):
+                it = w.item(i)
+                if it is not None and it.data(Qt.ItemDataRole.UserRole) == slider_idx:
+                    w.takeItem(i)
+                    return
+
+    def startDrag(self, supportedActions) -> None:
+        item = self.currentItem()
+        if item is None:
+            return
+        idx = item.data(Qt.ItemDataRole.UserRole)
+        if idx is None:
+            return
+        mime = QMimeData()
+        mime.setData(SLIDER_DECK_MIME, QByteArray(str(idx).encode('utf-8')))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def dropEvent(self, event) -> None:
+        if event.source() == self:
+            super().dropEvent(event)
+            if self._on_drop_callback:
+                self._on_drop_callback()
+            return
+        if not event.mimeData().hasFormat(SLIDER_DECK_MIME):
+            return
+        data = event.mimeData().data(SLIDER_DECK_MIME).data().decode('utf-8')
+        try:
+            slider_idx = int(data)
+        except ValueError:
+            return
+        if 0 <= slider_idx <= 4:
+            self._remove_slider_idx_from_siblings(slider_idx)
+            it = QListWidgetItem(self._slider_label(slider_idx))
+            it.setData(Qt.ItemDataRole.UserRole, slider_idx)
+            self.addItem(it)
+        event.acceptProposedAction()
+        if self._on_drop_callback:
+            self._on_drop_callback()
+
+    def _slider_label(self, idx: int) -> str:
+        labels = [
+            QApplication.translate('Label', 'Air'),
+            QApplication.translate('Label', 'Drum'),
+            QApplication.translate('Label', 'GAS IO'),
+            QApplication.translate('Label', 'Burner'),
+            QApplication.translate('Label', 'SV'),
+        ]
+        return labels[idx] if 0 <= idx < 5 else str(idx)
+
+
+class ButtonRowListWidget(QListWidget):
+    """List widget for one row of buttons or Unassigned. DnD between siblings."""
+    def __init__(self, parent: QWidget | None, siblings: list, aw: 'ApplicationWindow') -> None:
+        super().__init__(parent)
+        self._siblings: list = siblings
+        self._aw = aw
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+
+    def _remove_button_idx_from_siblings(self, button_idx: int) -> None:
+        for w in self._siblings:
+            if w is self:
+                continue
+            for i in range(w.count() - 1, -1, -1):
+                it = w.item(i)
+                if it is not None and it.data(Qt.ItemDataRole.UserRole) == button_idx:
+                    w.takeItem(i)
+                    return
+
+    def startDrag(self, supportedActions) -> None:
+        item = self.currentItem()
+        if item is None:
+            return
+        idx = item.data(Qt.ItemDataRole.UserRole)
+        if idx is None:
+            return
+        mime = QMimeData()
+        mime.setData(BUTTON_ROW_MIME, QByteArray(str(idx).encode('utf-8')))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def dropEvent(self, event) -> None:
+        if event.source() == self:
+            super().dropEvent(event)
+            return
+        if not event.mimeData().hasFormat(BUTTON_ROW_MIME):
+            return
+        data = event.mimeData().data(BUTTON_ROW_MIME).data().decode('utf-8')
+        try:
+            button_idx = int(data)
+        except ValueError:
+            return
+        n = len(getattr(self._aw, 'extraeventstypes', []))
+        if 0 <= button_idx < n:
+            self._remove_button_idx_from_siblings(button_idx)
+            label = getattr(self._aw, 'extraeventslabels', [''] * n)[button_idx] if button_idx < len(getattr(self._aw, 'extraeventslabels', [])) else str(button_idx)
+            it = QListWidgetItem(label or str(button_idx))
+            it.setData(Qt.ItemDataRole.UserRole, button_idx)
+            self.addItem(it)
+        event.acceptProposedAction()
+
+
+class LayoutSequenceListWidget(QListWidget):
+    """Single list for layout sequence; InternalMove reorder triggers callback."""
+    def dropEvent(self, event) -> None:
+        super().dropEvent(event)
+        cb = getattr(self, '_layout_callback', None)
+        if callable(cb):
+            cb()
+
+
+def _extraevent_slot_user_role(slot_index: int, kind: str) -> Any:
+    """Return value to store in Qt.UserRole for row list item. kind is 'button' or 'spacer'."""
+    return (slot_index, kind)
+
+
+def _parse_extraevent_slot_user_role(data: Any) -> tuple[int | None, str | None]:
+    """Return (slot_index, kind) or (None, None)."""
+    if isinstance(data, (list, tuple)) and len(data) >= 2:
+        return (int(data[0]), str(data[1]))
+    return (None, None)
+
+
+class RowDnDListWidget(QListWidget):
+    """One of Row 1..Row N or Unassigned. DnD between siblings; payload slot_index + kind (button/spacer)."""
+    def __init__(self, parent: QWidget | None, siblings: list, is_unassigned: bool, dlg: 'EventsDlg') -> None:
+        super().__init__(parent)
+        self._siblings: list = siblings
+        self._is_unassigned: bool = is_unassigned
+        self._dlg: 'EventsDlg' = dlg
+        self._on_drop_callback: Callable[[], None] | None = None
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDropIndicatorShown(True)
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+
+    def _remove_slot_from_siblings(self, slot_index: int) -> None:
+        """Remove ALL occurrences of slot_index from ALL sibling lists (not just the first)."""
+        for w in self._siblings:
+            if w is self:
+                continue
+            while True:
+                found = False
+                for i in range(w.count() - 1, -1, -1):
+                    it = w.item(i)
+                    if it is None:
+                        continue
+                    sid, _ = _parse_extraevent_slot_user_role(it.data(Qt.ItemDataRole.UserRole))
+                    if sid == slot_index:
+                        w.takeItem(i)
+                        found = True
+                        break
+                if not found:
+                    break
+
+    def _item_text_for_slot(self, slot_index: int, kind: str) -> str:
+        if kind == 'spacer':
+            n = len(getattr(self._dlg, 'extraeventsvalues', []))
+            px = 20
+            if slot_index < n:
+                v = getattr(self._dlg, 'extraeventsvalues', [20.0] * n)
+                px = int(v[slot_index]) if slot_index < len(v) and v[slot_index] > 0 else 20
+            return QApplication.translate('Label', 'Spacer') + ': %d px' % px
+        n = len(getattr(self._dlg, 'extraeventstypes', []))
+        labels = getattr(self._dlg, 'extraeventslabels', [''] * n)
+        lab = (labels[slot_index] if slot_index < len(labels) else '') or ('E%d' % (slot_index + 1))
+        return 'E%d: %s' % (slot_index + 1, lab)
+
+    def startDrag(self, supportedActions) -> None:
+        item = self.currentItem()
+        if item is None:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        slot_index, kind = _parse_extraevent_slot_user_role(data)
+        if slot_index is None or kind is None:
+            return
+        mime = QMimeData()
+        mime.setData(EXTRAEVENT_SLOT_MIME, QByteArray(('%d:%s' % (slot_index, kind)).encode('utf-8')))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def dragEnterEvent(self, event) -> None:
+        if not event.mimeData().hasFormat(EXTRAEVENT_SLOT_MIME):
+            super().dragEnterEvent(event)
+            return
+        raw = event.mimeData().data(EXTRAEVENT_SLOT_MIME).data().decode('utf-8')
+        parts = raw.split(':', 1)
+        kind = parts[1] if len(parts) > 1 else 'button'
+        if self._is_unassigned and kind == 'spacer':
+            return
+        event.acceptProposedAction()
+
+    def dragMoveEvent(self, event) -> None:
+        if not event.mimeData().hasFormat(EXTRAEVENT_SLOT_MIME):
+            super().dragMoveEvent(event)
+            return
+        raw = event.mimeData().data(EXTRAEVENT_SLOT_MIME).data().decode('utf-8')
+        parts = raw.split(':', 1)
+        kind = parts[1] if len(parts) > 1 else 'button'
+        if self._is_unassigned and kind == 'spacer':
+            return
+        event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        if not event.mimeData().hasFormat(EXTRAEVENT_SLOT_MIME):
+            super().dropEvent(event)
+            return
+        raw = event.mimeData().data(EXTRAEVENT_SLOT_MIME).data().decode('utf-8')
+        parts = raw.split(':', 1)
+        try:
+            slot_index = int(parts[0])
+        except (ValueError, IndexError):
+            super().dropEvent(event)
+            return
+        kind = parts[1] if len(parts) > 1 else 'button'
+        if self._is_unassigned and kind == 'spacer':
+            event.ignore()
+            return
+        n = len(getattr(self._dlg, 'extraeventstypes', []))
+        if slot_index < 0 or slot_index >= n:
+            super().dropEvent(event)
+            return
+        event.setDropAction(Qt.DropAction.MoveAction)
+        self._remove_slot_from_siblings(slot_index)
+        text = self._item_text_for_slot(slot_index, kind)
+        it = QListWidgetItem(text)
+        it.setData(Qt.ItemDataRole.UserRole, _extraevent_slot_user_role(slot_index, kind))
+        row = self.indexAt(event.position().toPoint()).row()
+        if row < 0:
+            self.addItem(it)
+        else:
+            self.insertItem(row, it)
+        vis = getattr(self._dlg, 'extraeventsvisibility', [1] * n)
+        if len(vis) > slot_index:
+            self._dlg.extraeventsvisibility[slot_index] = 0 if self._is_unassigned else 1
+        event.accept()
+        cb = getattr(self, '_on_drop_callback', None)
+        if callable(cb):
+            cb()
+
 
 class EventsDlg(ArtisanResizeablDialog):
     def __init__(self, parent:QWidget, aw:'ApplicationWindow', activeTab:int = 0) -> None:
@@ -693,10 +977,6 @@ class EventsDlg(ArtisanResizeablDialog):
         self.showExtraButtonTooltips.setToolTip(QApplication.translate('Tooltip', 'Show custom event button specification as button tooltip'))
         self.showExtraButtonTooltips.setChecked(self.aw.show_extrabutton_tooltips)
         self.showExtraButtonTooltips.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.extraeventbuttonsCompactLayoutCheckBox = QCheckBox(QApplication.translate('CheckBox','Compact buttons layout (left aligned, ignore hidden spacers)'))
-        self.extraeventbuttonsCompactLayoutCheckBox.setToolTip(QApplication.translate('Tooltip', 'Only add visible buttons to the bar; left-align rows with no gaps for hidden buttons'))
-        self.extraeventbuttonsCompactLayoutCheckBox.setChecked(getattr(self.aw, 'extraeventbuttonsCompactLayout', False))
-        self.extraeventbuttonsCompactLayoutCheckBox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         #table for showing events
         self.eventbuttontable = QTableWidget()
         self.eventbuttontable.setTabKeyNavigation(True)
@@ -1035,6 +1315,7 @@ class EventsDlg(ArtisanResizeablDialog):
         self.sliderContainerModeComboBox = QComboBox()
         self.sliderContainerModeComboBox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.sliderContainerModeComboBox.addItem(QApplication.translate('ComboBox', 'Dock Left'), 'dock_left')
+        self.sliderContainerModeComboBox.addItem(QApplication.translate('ComboBox', 'Dock Right'), 'dock_right')
         self.sliderContainerModeComboBox.addItem(QApplication.translate('ComboBox', 'Dock Bottom'), 'dock_bottom')
         self.sliderContainerModeComboBox.addItem(QApplication.translate('ComboBox', 'Embedded under graphs'), 'embedded')
         idx = self.sliderContainerModeComboBox.findData(getattr(self.aw, 'eventsliderContainerMode', 'dock_left'))
@@ -1045,6 +1326,7 @@ class EventsDlg(ArtisanResizeablDialog):
         self.sliderLayoutModeComboBox.addItem(QApplication.translate('ComboBox', 'Auto (recommended)'), 'auto')
         self.sliderLayoutModeComboBox.addItem(QApplication.translate('ComboBox', 'Vertical (legacy)'), 'vertical')
         self.sliderLayoutModeComboBox.addItem(QApplication.translate('ComboBox', 'Horizontal row'), 'horizontal')
+        self.sliderLayoutModeComboBox.addItem(QApplication.translate('ComboBox', 'Decks (L | Buttons | R | SV)'), 'decks')
         idx_layout = self.sliderLayoutModeComboBox.findData(getattr(self.aw, 'eventsliderLayoutMode', 'auto'))
         self.sliderLayoutModeComboBox.setCurrentIndex(idx_layout if idx_layout >= 0 else 0)
         self.E1visibility = QCheckBox(self.aw.qmc.etypesf(0))
@@ -1566,7 +1848,6 @@ class EventsDlg(ArtisanResizeablDialog):
         legacyLayoutInner.addWidget(self.nbuttonslabel)
         legacyLayoutInner.addWidget(self.nbuttonsSpinBox)
         legacyLayoutInner.addSpacing(10)
-        legacyLayoutInner.addWidget(self.extraeventbuttonsCompactLayoutCheckBox)
         legacyLayoutInner.addStretch()
         legacyLayoutGroupBox.setLayout(legacyLayoutInner)
         nbuttonslayout = QHBoxLayout()
@@ -1592,9 +1873,101 @@ class EventsDlg(ArtisanResizeablDialog):
         tab2buttonlayout.addStretch()
         tab2buttonlayout.addWidget(helpDialogButton)
         ### tab2 layout
+        self.extraeventbuttonsCompactLayoutCheckBox = QCheckBox(QApplication.translate('CheckBox', 'Compact buttons layout (left aligned, ignore hidden spacers)'))
+        self.extraeventbuttonsCompactLayoutCheckBox.setToolTip(QApplication.translate('Tooltip', 'Only add visible buttons to the bar; left-align rows with no gaps for hidden buttons'))
+        self.extraeventbuttonsCompactLayoutCheckBox.setChecked(getattr(self.aw, 'extraeventbuttonsCompactLayout', False))
+        self.extraeventbuttonsCompactLayoutCheckBox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.layoutSequenceList = LayoutSequenceListWidget(self)
+        self.layoutSequenceList.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.layoutSequenceList.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.layoutSequenceList.setDragEnabled(True)
+        self.layoutSequenceList.setAcceptDrops(True)
+        self.layoutSequenceList.setDropIndicatorShown(True)
+        self.layoutSequenceList._layout_callback = self._on_layout_sequence_changed
+        self.layoutSequenceList.setVisible(False)
+        buttonRowsGroupLegacy = QGroupBox(QApplication.translate('GroupBox', 'Layout sequence (legacy)'))
+        buttonRowsLayoutLegacy = QVBoxLayout()
+        buttonRowsLayoutLegacy.addWidget(QLabel(QApplication.translate('Label', 'Sequence (Button / Row break / Spacer)')))
+        buttonRowsLayoutLegacy.addWidget(self.layoutSequenceList)
+        buttonRowsGroupLegacy.setLayout(buttonRowsLayoutLegacy)
+        buttonRowsGroupLegacy.setVisible(False)
+        self.rowListWidgets = []
+        self._rows_ui_initialized = False
+        self._rows_ui_dirty = False
+        self.unassignedListWidget = RowDnDListWidget(self, [], True, self)
+        all_row_siblings = []
+        for r in range(NUM_BUTTON_ROWS):
+            w = RowDnDListWidget(self, all_row_siblings, False, self)
+            self.rowListWidgets.append(w)
+            all_row_siblings.append(w)
+        all_row_siblings.append(self.unassignedListWidget)
+        for w in self.rowListWidgets:
+            w._siblings = all_row_siblings
+        self.unassignedListWidget._siblings = all_row_siblings
+        for w in all_row_siblings:
+            w._on_drop_callback = self._rows_ui_changed
+        self.rowsCountSpin = QSpinBox()
+        self.rowsCountSpin.setRange(1, NUM_BUTTON_ROWS)
+        self.rowsCountSpin.setValue(3)
+        self.rowsCountSpin.setToolTip(QApplication.translate('Tooltip', 'Number of button rows (1-10)'))
+        self.rowsCountSpin.valueChanged.connect(self._rows_count_changed)
+        buttonRowsDnDLabel = QLabel(QApplication.translate('Label', 'Drag buttons between rows; Unassigned are hidden. Use spacers for gaps.'))
+        buttonRowsDnDGrid = QGridLayout()
+        for r in range(NUM_BUTTON_ROWS):
+            buttonRowsDnDGrid.addWidget(QLabel(QApplication.translate('Label', 'Row %d') % (r + 1)), r, 0)
+            buttonRowsDnDGrid.addWidget(self.rowListWidgets[r], r, 1)
+        buttonRowsDnDGrid.addWidget(QLabel(QApplication.translate('Label', 'Unassigned')), NUM_BUTTON_ROWS, 0)
+        buttonRowsDnDGrid.addWidget(self.unassignedListWidget, NUM_BUTTON_ROWS, 1)
+        self._update_rows_visibility_by_count()
+        self.rowAddSpacerButton = QPushButton(QApplication.translate('Button', 'Add spacer'))
+        self.rowAddSpacerButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.rowAddSpacerButton.clicked.connect(self._row_add_spacer)
+        self.rowEditSpacerButton = QPushButton(QApplication.translate('Button', 'Edit spacer px'))
+        self.rowEditSpacerButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.rowEditSpacerButton.clicked.connect(self._row_edit_spacer)
+        self.rowDeleteSpacerButton = QPushButton(QApplication.translate('Button', 'Delete spacer'))
+        self.rowDeleteSpacerButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.rowDeleteSpacerButton.clicked.connect(self._row_delete_spacer)
+        for w in (self.rowListWidgets + [self.unassignedListWidget]):
+            w.itemSelectionChanged.connect(self._row_list_selection_changed)
+            w.itemDoubleClicked.connect(self._row_list_item_double_clicked)
+        rowSpacerLayout = QHBoxLayout()
+        rowSpacerLayout.addWidget(QLabel(QApplication.translate('Label', 'Rows:')))
+        rowSpacerLayout.addWidget(self.rowsCountSpin)
+        rowSpacerLayout.addSpacing(10)
+        rowSpacerLayout.addWidget(self.rowAddSpacerButton)
+        rowSpacerLayout.addWidget(self.rowEditSpacerButton)
+        rowSpacerLayout.addWidget(self.rowDeleteSpacerButton)
+        rowSpacerLayout.addStretch()
+        buttonRowsDnDTop = QVBoxLayout()
+        buttonRowsDnDTop.addWidget(self.extraeventbuttonsCompactLayoutCheckBox)
+        buttonRowsDnDTop.addWidget(buttonRowsDnDLabel)
+        buttonRowsDnDTop.addLayout(buttonRowsDnDGrid)
+        buttonRowsDnDTop.addLayout(rowSpacerLayout)
+        buttonRowsGroup = QGroupBox(QApplication.translate('GroupBox', 'Rows layout (Drag & Drop)'))
+        buttonRowsGroup.setLayout(buttonRowsDnDTop)
+        setupTab = QWidget()
+        setupTab.setLayout(QVBoxLayout())
+        setupTab.layout().setContentsMargins(0, 0, 0, 0)
+        setupTab.layout().addWidget(self.eventbuttontable)
+        setupTab.layout().addLayout(nbuttonslayout)
+        setupTab.layout().addWidget(buttonRowsGroupLegacy)
+        layoutTab = QWidget()
+        layoutTab.setLayout(QVBoxLayout())
+        layoutTab.layout().setContentsMargins(0, 0, 0, 0)
+        layoutTab.layout().addWidget(buttonRowsGroup)
+        buttonsSubTabs = QTabWidget()
+        buttonsSubTabs.addTab(setupTab, QApplication.translate('Tab', 'Setup'))
+        buttonsSubTabs.addTab(layoutTab, QApplication.translate('Tab', 'Layout'))
+        def _on_buttons_subtab_changed(idx: int) -> None:
+            if idx == 1:
+                rows, unassigned = self._parse_roles_to_rows()
+                self._render_rows_ui(rows, unassigned)
+                self._rows_ui_initialized = True
+                self._rows_ui_dirty = False
+        buttonsSubTabs.currentChanged.connect(_on_buttons_subtab_changed)
         tab2layout = QVBoxLayout()
-        tab2layout.addWidget(self.eventbuttontable)
-        tab2layout.addLayout(nbuttonslayout)
+        tab2layout.addWidget(buttonsSubTabs)
         tab2layout.addLayout(tab2buttonlayout)
         tab2layout.setSpacing(5)
         tab2layout.setContentsMargins(0,10,0,5)
@@ -1738,10 +2111,79 @@ class EventsDlg(ArtisanResizeablDialog):
         SliderHelpHBox.addWidget(self.sliderLayoutModeComboBox)
         SliderHelpHBox.addSpacing(10)
         SliderHelpHBox.addWidget(self.sliderKeyboardControlflag)
+        self.decksLockFlag = QCheckBox(QApplication.translate('CheckBox', 'Lock decks layout'))
+        self.decksLockFlag.setToolTip(QApplication.translate('Tooltip', 'Lock panel order and splitter sizes in Decks layout'))
+        self.decksLockFlag.setChecked(getattr(self.aw, 'eventsDecksLayoutLocked', False))
+        self.decksLockFlag.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.decksPanelCombo = QComboBox()
+        self.decksPanelCombo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.decksPanelCombo.addItem(QApplication.translate('ComboBox', 'Deck Left'), 'deck_left')
+        self.decksPanelCombo.addItem(QApplication.translate('ComboBox', 'Buttons'), 'buttons')
+        self.decksPanelCombo.addItem(QApplication.translate('ComboBox', 'Deck Right'), 'deck_right')
+        self.decksMoveLeftButton = QPushButton(QApplication.translate('Button', 'Move left'))
+        self.decksMoveLeftButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.decksMoveLeftButton.clicked.connect(self.decks_move_left)
+        self.decksMoveRightButton = QPushButton(QApplication.translate('Button', 'Move right'))
+        self.decksMoveRightButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.decksMoveRightButton.clicked.connect(self.decks_move_right)
+        self.decksOrderLabel = QLabel('')
+        self.decksOrderLabel.setMinimumWidth(200)
+        self._update_decks_order_label()
+        DecksHBox = QHBoxLayout()
+        DecksHBox.addWidget(self.decksLockFlag)
+        DecksHBox.addSpacing(10)
+        DecksHBox.addWidget(QLabel(QApplication.translate('Label', 'Panel:')))
+        DecksHBox.addWidget(self.decksPanelCombo)
+        DecksHBox.addWidget(self.decksMoveLeftButton)
+        DecksHBox.addWidget(self.decksMoveRightButton)
+        DecksHBox.addWidget(self.decksOrderLabel)
+        DecksHBox.addStretch()
+        self.sliderLayoutModeComboBox.currentIndexChanged.connect(self._update_decks_ui_enabled)
+        self.decksLockFlag.stateChanged.connect(self._update_decks_ui_enabled)
+        # Decks configuration: 3 DnD list widgets (Deck Left | Deck Right | Hidden); no separate Deck SV
+        self.decksConfigGroupBox = QGroupBox(QApplication.translate('GroupBox', 'Decks configuration'))
+        decksConfigLayout = QGridLayout()
+        self.decksDeckLeftList = SliderDeckListWidget(self, [])
+        self.decksDeckRightList = SliderDeckListWidget(self, [])
+        self.decksHiddenList = SliderDeckListWidget(self, [])
+        siblings = [self.decksDeckLeftList, self.decksDeckRightList, self.decksHiddenList]
+        for w in siblings:
+            w._siblings = siblings
+            w._on_drop_callback = self._decks_config_apply_from_lists
+        decksConfigLayout.addWidget(QLabel(QApplication.translate('Label', 'Deck Left')), 0, 0)
+        decksConfigLayout.addWidget(QLabel(QApplication.translate('Label', 'Deck Right')), 0, 1)
+        decksConfigLayout.addWidget(QLabel(QApplication.translate('Label', 'Hidden')), 0, 2)
+        decksConfigLayout.addWidget(self.decksDeckLeftList, 1, 0)
+        decksConfigLayout.addWidget(self.decksDeckRightList, 1, 1)
+        decksConfigLayout.addWidget(self.decksHiddenList, 1, 2)
+        orient_row = 2
+        decksConfigLayout.addWidget(QLabel(QApplication.translate('Label', 'Deck Left') + ' ' + QApplication.translate('Label', 'orientation') + ':'), orient_row, 0)
+        self.decksOrientLeftCombo = QComboBox()
+        self.decksOrientLeftCombo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.decksOrientLeftCombo.addItem(QApplication.translate('ComboBox', 'Vertical'), 'vertical')
+        self.decksOrientLeftCombo.addItem(QApplication.translate('ComboBox', 'Horizontal'), 'horizontal')
+        decksConfigLayout.addWidget(self.decksOrientLeftCombo, orient_row, 1)
+        decksConfigLayout.addWidget(QLabel(QApplication.translate('Label', 'Deck Right') + ' ' + QApplication.translate('Label', 'orientation') + ':'), orient_row, 2)
+        self.decksOrientRightCombo = QComboBox()
+        self.decksOrientRightCombo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.decksOrientRightCombo.addItem(QApplication.translate('ComboBox', 'Vertical'), 'vertical')
+        self.decksOrientRightCombo.addItem(QApplication.translate('ComboBox', 'Horizontal'), 'horizontal')
+        decksConfigLayout.addWidget(self.decksOrientRightCombo, orient_row, 3)
+        reset_decks_btn = QPushButton(QApplication.translate('Button', 'Reset to default'))
+        reset_decks_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        reset_decks_btn.clicked.connect(self._decks_config_reset_to_default)
+        decksConfigLayout.addWidget(reset_decks_btn, orient_row + 1, 0, 1, 4)
+        self.decksConfigGroupBox.setLayout(decksConfigLayout)
+        self.decksOrientLeftCombo.currentIndexChanged.connect(self._on_decks_config_changed)
+        self.decksOrientRightCombo.currentIndexChanged.connect(self._on_decks_config_changed)
+        self._load_decks_config_into_ui()
+        self._update_decks_ui_enabled()
         C5VBox = QVBoxLayout()
         C5VBox.addLayout(tab5Layout)
         C5VBox.addStretch()
         C5VBox.addLayout(SliderHelpHBox)
+        C5VBox.addLayout(DecksHBox)
+        C5VBox.addWidget(self.decksConfigGroupBox)
         ### tab6 layout
         tab6Layout = QGridLayout()
         tab6Layout.addWidget(qeventtitlelabel,0,0,Qt.AlignmentFlag.AlignCenter)
@@ -2042,10 +2484,12 @@ class EventsDlg(ArtisanResizeablDialog):
         if QApplication.queryKeyboardModifiers() == Qt.KeyboardModifier.AltModifier:
             # if ALT/OPTION key is hold, the items are swap
             swap = True
+        while len(self.extraeventslayoutroles) < max_rows:
+            self.extraeventslayoutroles.append(0)
         l:list[Any]
         event_data:list[list[Any]] = [self.extraeventslabels, self.extraeventsdescriptions, self.extraeventstypes, self.extraeventsvalues,
                 self.extraeventsactions, self.extraeventsactionstrings, self.extraeventsvisibility, self.extraeventbuttoncolor,
-                self.extraeventbuttontextcolor]
+                self.extraeventbuttontextcolor, self.extraeventslayoutroles]
         for l in event_data:
             if swap:
                 self.swapItems(l, logicalIndex, newVisualIndex)
@@ -2055,7 +2499,7 @@ class EventsDlg(ArtisanResizeablDialog):
         self.eventbuttontable.clearContents() # resets the view
         self.eventbuttontable.setRowCount(0)  # resets the data model
         self.createEventbuttonTable()
-
+        self.savetableextraeventbutton()
 
     @pyqtSlot()
     def selectionChanged(self) -> None:
@@ -2142,7 +2586,10 @@ class EventsDlg(ArtisanResizeablDialog):
             if i == 0:
                 self.saveSliderSettings()
                 self.saveQuantifierSettings()
-            elif i == 1: # switched to Button tab
+            elif i == 1:  # switched to Buttons tab
+                rows, unassigned = self._parse_roles_to_rows()
+                self._render_rows_ui(rows, unassigned)
+                self._row_list_selection_changed()
                 self.saveEventTypes()
                 self.createEventbuttonTable()
                 self.saveSliderSettings()
@@ -2814,8 +3261,7 @@ class EventsDlg(ArtisanResizeablDialog):
         vheader = self.eventbuttontable.verticalHeader()
         if vheader is not None:
             vheader.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-            vheader.setSectionsMovable(True)
-            vheader.setDragDropMode(QTableWidget.DragDropMode.InternalMove)
+            vheader.setSectionsMovable(False)
             vheader.setAutoScroll(False)
 
         visibility = [QApplication.translate('ComboBox','OFF'),
@@ -3032,52 +3478,39 @@ class EventsDlg(ArtisanResizeablDialog):
 
     def savetableextraeventbutton(self) -> None:
         maxButton = len(self.extraeventstypes)
-        #Clean Lists:
-        #Labels
+        if maxButton == 0:
+            return
         self.aw.extraeventslabels         = [''] * maxButton
-        #Description
         self.aw.extraeventsdescriptions   = [''] * maxButton
-        #Types
         self.aw.extraeventstypes          = [4] * maxButton
-        #Values
         self.aw.extraeventsvalues         = [0.] * maxButton
-        #Actions
         self.aw.extraeventsactions        = [0] * maxButton
-        #Action Description
         self.aw.extraeventsactionstrings  = [''] * maxButton
-        #Visibility
         self.aw.extraeventsvisibility     = [1] * maxButton
-        #Color
         self.aw.extraeventbuttoncolor     = ['#808080'] * maxButton
-        #Text Color
         self.aw.extraeventbuttontextcolor = ['white'] * maxButton
-        #Layout roles: 0=button, 1=spacer, 2=row_break
         self.aw.extraeventslayoutroles    = [0] * maxButton
 
-        #Sorting buttons based on the visualRow
-        for i in range(maxButton):
-            visualIndex = i #self.eventbuttontable.visualRow(i)
-
-            #Labels
-            self.aw.extraeventslabels[visualIndex]         = self.extraeventslabels[i]
-            #Description
-            self.aw.extraeventsdescriptions[visualIndex]   = self.extraeventsdescriptions[i]
-            #Types
-            self.aw.extraeventstypes[visualIndex]          = self.extraeventstypes[i]
-            #Values
-            self.aw.extraeventsvalues[visualIndex]         = self.extraeventsvalues[i]
-            #Actions
-            self.aw.extraeventsactions[visualIndex]        = self.extraeventsactions[i]
-            #Action Description
-            self.aw.extraeventsactionstrings[visualIndex]  = self.extraeventsactionstrings[i]
-            #Visibility
-            self.aw.extraeventsvisibility[visualIndex]     = self.extraeventsvisibility[i]
-            #Color
-            self.aw.extraeventbuttoncolor[visualIndex]     = self.extraeventbuttoncolor[i]
-            #Text Color
-            self.aw.extraeventbuttontextcolor[visualIndex] = self.extraeventbuttontextcolor[i]
-            #Layout role
-            self.aw.extraeventslayoutroles[visualIndex]    = self.extraeventslayoutroles[i] if i < len(self.extraeventslayoutroles) else 0
+        vh = self.eventbuttontable.verticalHeader() if hasattr(self, 'eventbuttontable') else None
+        for v in range(maxButton):
+            logical = v
+            if vh is not None:
+                try:
+                    L = vh.logicalIndex(v)
+                    if 0 <= L < maxButton:
+                        logical = L
+                except Exception:  # pylint: disable=broad-except
+                    pass
+            self.aw.extraeventslabels[v]         = self.extraeventslabels[logical]
+            self.aw.extraeventsdescriptions[v]   = self.extraeventsdescriptions[logical]
+            self.aw.extraeventstypes[v]          = self.extraeventstypes[logical]
+            self.aw.extraeventsvalues[v]         = self.extraeventsvalues[logical]
+            self.aw.extraeventsactions[v]        = self.extraeventsactions[logical]
+            self.aw.extraeventsactionstrings[v]  = self.extraeventsactionstrings[logical]
+            self.aw.extraeventsvisibility[v]     = self.extraeventsvisibility[logical]
+            self.aw.extraeventbuttoncolor[v]     = self.extraeventbuttoncolor[logical]
+            self.aw.extraeventbuttontextcolor[v] = self.extraeventbuttontextcolor[logical]
+            self.aw.extraeventslayoutroles[v]    = self.extraeventslayoutroles[logical] if logical < len(self.extraeventslayoutroles) else 0
 
         #Apply Event Button Changes
         self.aw.update_extraeventbuttons_visibility()
@@ -3283,6 +3716,9 @@ class EventsDlg(ArtisanResizeablDialog):
                 self.extraeventslayoutroles.pop(bindex)
 
             self.createEventbuttonTable()
+            if hasattr(self, 'rowListWidgets') and self.rowListWidgets:
+                rows, unassigned = self._parse_roles_to_rows()
+                self._render_rows_ui(rows, unassigned)
 
     @pyqtSlot(bool)
     def addextraeventbuttonSlot(self, _:bool = False) -> None:
@@ -3311,6 +3747,9 @@ class EventsDlg(ArtisanResizeablDialog):
         self.extraeventbuttontextcolor.insert(bindex, 'white')
         self.extraeventslayoutroles.insert(bindex, 1)  # spacer
         self.createEventbuttonTable()
+        if hasattr(self, 'rowListWidgets') and self.rowListWidgets:
+            rows, unassigned = self._parse_roles_to_rows()
+            self._render_rows_ui(rows, unassigned)
 
     @pyqtSlot(bool)
     def insertRowBreakSlot(self, _:bool = False) -> None:
@@ -3331,6 +3770,9 @@ class EventsDlg(ArtisanResizeablDialog):
         self.extraeventbuttontextcolor.insert(bindex, 'white')
         self.extraeventslayoutroles.insert(bindex, 2)  # row_break
         self.createEventbuttonTable()
+        if hasattr(self, 'rowListWidgets') and self.rowListWidgets:
+            rows, unassigned = self._parse_roles_to_rows()
+            self._render_rows_ui(rows, unassigned)
 
     def insertextraeventbutton(self, insert:bool = False) -> None:
         if len(self.extraeventstypes) >= self.aw.buttonlistmaxlen * self.aw.max_palettes: # max 10 rows of buttons of buttonlistmaxlen
@@ -3387,6 +3829,9 @@ class EventsDlg(ArtisanResizeablDialog):
             self.extraeventslabels.insert(bindex,event_label)
 
             self.createEventbuttonTable()
+            if hasattr(self, 'rowListWidgets') and self.rowListWidgets:
+                rows, unassigned = self._parse_roles_to_rows()
+                self._render_rows_ui(rows, unassigned)
 
     @pyqtSlot(int)
     def eventsbuttonflagChanged(self, _:int) -> None:
@@ -3483,6 +3928,568 @@ class EventsDlg(ArtisanResizeablDialog):
         self.aw.qmc.event_style = self.eventStyleComboBox.currentData() or 'classic'
         self.aw.qmc.redraw(recomputeAllDeltas=False)
 
+    def _events_decks_config_default(self) -> dict:
+        """Return a fresh default decks config (Left=[E1,E2] vertical, Right=[E3,E4,SV] horizontal). No separate deck_sv."""
+        return {
+            'deck_left': {'orientation': 'vertical', 'sliders': [0, 1]},
+            'deck_right': {'orientation': 'horizontal', 'sliders': [2, 3, 4]},
+        }
+
+    def _sanitize_decks_config(self, cfg: dict) -> dict:
+        """Sanitize eventsDecksConfig: only deck_left/deck_right, valid orientation/sliders, no duplicate indices. Empty result → default."""
+        if not isinstance(cfg, dict):
+            return self._events_decks_config_default()
+        allowed = ('deck_left', 'deck_right')
+        used: set[int] = set()
+        result: dict = {}
+        for key in allowed:
+            entry = cfg.get(key) if isinstance(cfg.get(key), dict) else {}
+            orient = entry.get('orientation') if isinstance(entry.get('orientation'), str) else 'vertical'
+            result[key] = {'orientation': orient if orient in ('vertical', 'horizontal') else 'vertical', 'sliders': []}
+            raw = entry.get('sliders') if isinstance(entry.get('sliders'), (list, tuple)) else []
+            for x in raw:
+                if isinstance(x, (int, float)) and 0 <= int(x) <= 4:
+                    i = int(x)
+                    if i not in used:
+                        result[key]['sliders'].append(i)
+                        used.add(i)
+        if not any(result[k]['sliders'] for k in allowed):
+            return self._events_decks_config_default()
+        return result
+
+    def _update_decks_order_label(self) -> None:
+        order = getattr(self.aw, 'eventsDecksPanelOrder', ['deck_left', 'buttons', 'deck_right'])
+        self.decksOrderLabel.setText(' | '.join(order))
+
+    def _update_decks_ui_enabled(self) -> None:
+        if not hasattr(self, 'decksDeckLeftList'):
+            return
+        layout_mode = self.sliderLayoutModeComboBox.currentData() or 'auto'
+        is_decks = layout_mode == 'decks'
+        self.decksLockFlag.setEnabled(is_decks)
+        self.decksPanelCombo.setEnabled(is_decks)
+        locked = self.decksLockFlag.isChecked()
+        if is_decks and not locked:
+            order = [x for x in getattr(self.aw, 'eventsDecksPanelOrder', ['deck_left', 'buttons', 'deck_right']) if x in ('deck_left', 'buttons', 'deck_right')] or ['deck_left', 'buttons', 'deck_right']
+            pid = self.decksPanelCombo.currentData()
+            if pid and pid in order:
+                idx = order.index(pid)
+                self.decksMoveLeftButton.setEnabled(idx > 0)
+                self.decksMoveRightButton.setEnabled(idx < len(order) - 1)
+            else:
+                self.decksMoveLeftButton.setEnabled(False)
+                self.decksMoveRightButton.setEnabled(False)
+        else:
+            self.decksMoveLeftButton.setEnabled(False)
+            self.decksMoveRightButton.setEnabled(False)
+        self.decksOrderLabel.setEnabled(is_decks)
+        self.sliderAlternativeLayoutFlag.setEnabled(not is_decks)
+        if hasattr(self, 'decksConfigGroupBox'):
+            self.decksConfigGroupBox.setEnabled(is_decks and not locked)
+        for w in (self.decksDeckLeftList, self.decksDeckRightList, self.decksHiddenList):
+            w.setEnabled(is_decks and not locked)
+        # When "Lock decks layout" is on, disable DnD for button rows too
+        if hasattr(self, 'layoutSequenceList'):
+            self.layoutSequenceList.setEnabled(not (is_decks and locked))
+        if hasattr(self, 'extraeventbuttonsCompactLayoutCheckBox'):
+            self.extraeventbuttonsCompactLayoutCheckBox.setEnabled(not (is_decks and locked))
+        row_lists_enabled = not (is_decks and locked)
+        if hasattr(self, 'rowListWidgets'):
+            for w in self.rowListWidgets:
+                w.setEnabled(row_lists_enabled)
+        if hasattr(self, 'unassignedListWidget'):
+            self.unassignedListWidget.setEnabled(row_lists_enabled)
+        if hasattr(self, 'rowAddSpacerButton'):
+            self.rowAddSpacerButton.setEnabled(row_lists_enabled)
+        if hasattr(self, 'rowEditSpacerButton'):
+            self.rowEditSpacerButton.setEnabled(row_lists_enabled)
+        if hasattr(self, 'rowDeleteSpacerButton'):
+            self.rowDeleteSpacerButton.setEnabled(row_lists_enabled)
+        if hasattr(self, 'rowsCountSpin'):
+            self.rowsCountSpin.setEnabled(row_lists_enabled)
+        vheader = self.eventbuttontable.verticalHeader() if hasattr(self, 'eventbuttontable') else None
+        if vheader is not None:
+            vheader.setSectionsMovable(False)
+
+    def _build_decks_config_from_ui(self) -> dict:
+        """Build config from DnD list widgets and orientation combos. Only deck_left and deck_right (SV idx=4 in L/R/Hidden)."""
+        cfg = {
+            'deck_left': {'orientation': self.decksOrientLeftCombo.currentData() or 'vertical', 'sliders': []},
+            'deck_right': {'orientation': self.decksOrientRightCombo.currentData() or 'horizontal', 'sliders': []},
+        }
+        for i in range(self.decksDeckLeftList.count()):
+            it = self.decksDeckLeftList.item(i)
+            if it is not None:
+                idx = it.data(Qt.ItemDataRole.UserRole)
+                if idx is not None and 0 <= idx <= 4:
+                    cfg['deck_left']['sliders'].append(idx)
+        for i in range(self.decksDeckRightList.count()):
+            it = self.decksDeckRightList.item(i)
+            if it is not None:
+                idx = it.data(Qt.ItemDataRole.UserRole)
+                if idx is not None and 0 <= idx <= 4:
+                    cfg['deck_right']['sliders'].append(idx)
+        return cfg
+
+    def _decks_config_apply_from_lists(self) -> None:
+        """Build config from DnD lists, set on aw and apply layout (for live preview on drop)."""
+        cfg = self._sanitize_decks_config(self._build_decks_config_from_ui())
+        self.aw.eventsDecksConfig = cfg
+        self.aw.applyEventSliderLayout()
+
+    @pyqtSlot()
+    def _on_decks_config_changed(self) -> None:
+        layout_mode = self.sliderLayoutModeComboBox.currentData() or 'auto'
+        if layout_mode != 'decks':
+            return
+        self._decks_config_apply_from_lists()
+
+    @pyqtSlot()
+    def _decks_config_reset_to_default(self) -> None:
+        self._load_decks_config_into_ui(self._events_decks_config_default())
+        self._on_decks_config_changed()
+
+    def _load_decks_config_into_ui(self, config: dict | None = None) -> None:
+        """Populate Decks DnD lists and orientation combos from config."""
+        if config is None:
+            raw = getattr(self.aw, 'eventsDecksConfig', None)
+            config = self._sanitize_decks_config(raw) if isinstance(raw, dict) else self._events_decks_config_default()
+        left_sliders = list(config.get('deck_left', {}).get('sliders', []))
+        right_sliders = list(config.get('deck_right', {}).get('sliders', []))
+        sv_legacy = config.get('deck_sv', {}).get('sliders', [])
+        for idx in sv_legacy:
+            if idx == 4 and 4 not in right_sliders:
+                right_sliders.append(4)
+                break
+        assigned = set(left_sliders) | set(right_sliders)
+        hidden_sliders = [i for i in range(5) if i not in assigned]
+        def fill_list(widget, indices, label_fn):
+            widget.clear()
+            for idx in indices:
+                it = QListWidgetItem(label_fn(idx))
+                it.setData(Qt.ItemDataRole.UserRole, idx)
+                widget.addItem(it)
+        fill_list(self.decksDeckLeftList, left_sliders, self.decksDeckLeftList._slider_label)
+        fill_list(self.decksDeckRightList, right_sliders, self.decksDeckRightList._slider_label)
+        fill_list(self.decksHiddenList, hidden_sliders, self.decksHiddenList._slider_label)
+        for key, orient_combo in (
+            ('deck_left', self.decksOrientLeftCombo),
+            ('deck_right', self.decksOrientRightCombo),
+        ):
+            orient_combo.blockSignals(True)
+            o = config.get(key, {}).get('orientation', 'vertical')
+            idx = orient_combo.findData(o)
+            orient_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            orient_combo.blockSignals(False)
+
+    def _layout_sequence_role_text(self, i: int) -> str:
+        """Label for layout sequence list: Button name, 'Row break', or 'Spacer Npx'."""
+        n = len(getattr(self.aw, 'extraeventstypes', []))
+        if i < 0 or i >= n:
+            return ''
+        roles = getattr(self.aw, 'extraeventslayoutroles', [0] * n)
+        labels = getattr(self.aw, 'extraeventslabels', [''] * n)
+        role = roles[i] if i < len(roles) else 0
+        if role == 2:
+            return QApplication.translate('Label', 'Row break')
+        if role == 1:
+            vals = getattr(self.aw, 'extraeventsvalues', [20.0] * n)
+            px = int(vals[i]) if i < len(vals) and vals[i] > 0 else 20
+            return QApplication.translate('Label', 'Spacer') + ' %d px' % px
+        return (labels[i] if i < len(labels) else '') or ('E%d' % (i + 1))
+
+    def _load_layout_sequence_into_ui(self) -> None:
+        """Fill layout sequence list from extraeventslayoutroles/labels/values."""
+        n_buttons = len(getattr(self.aw, 'extraeventstypes', []))
+        self.layoutSequenceList.clear()
+        for i in range(n_buttons):
+            it = QListWidgetItem(self._layout_sequence_role_text(i))
+            it.setData(Qt.ItemDataRole.UserRole, i)
+            self.layoutSequenceList.addItem(it)
+        self.extraeventbuttonsCompactLayoutCheckBox.setChecked(getattr(self.aw, 'extraeventbuttonsCompactLayout', False))
+
+    def _on_layout_sequence_changed(self) -> None:
+        """After DnD: read list order, permute arrays by that order, refresh, realign."""
+        order = []
+        for r in range(self.layoutSequenceList.count()):
+            it = self.layoutSequenceList.item(r)
+            if it is not None:
+                idx = it.data(Qt.ItemDataRole.UserRole)
+                if idx is not None:
+                    order.append(idx)
+        n = len(getattr(self.aw, 'extraeventstypes', []))
+        if not order or len(order) != n:
+            return
+        if order == list(range(n)):
+            self.aw.realignbuttons()
+            return
+        # Permute dialog and aw arrays by order: new[i] = old[order[i]]
+        arrays = (
+            ('extraeventslabels', self.extraeventslabels, self.aw.extraeventslabels),
+            ('extraeventsdescriptions', self.extraeventsdescriptions, self.aw.extraeventsdescriptions),
+            ('extraeventstypes', self.extraeventstypes, self.aw.extraeventstypes),
+            ('extraeventsvalues', self.extraeventsvalues, self.aw.extraeventsvalues),
+            ('extraeventsactions', self.extraeventsactions, self.aw.extraeventsactions),
+            ('extraeventsactionstrings', self.extraeventsactionstrings, self.aw.extraeventsactionstrings),
+            ('extraeventsvisibility', self.extraeventsvisibility, self.aw.extraeventsvisibility),
+            ('extraeventbuttoncolor', self.extraeventbuttoncolor, self.aw.extraeventbuttoncolor),
+            ('extraeventbuttontextcolor', self.extraeventbuttontextcolor, self.aw.extraeventbuttontextcolor),
+            ('extraeventslayoutroles', self.extraeventslayoutroles, self.aw.extraeventslayoutroles),
+        )
+        for _name, dlg_arr, aw_arr in arrays:
+            if len(dlg_arr) != n or len(aw_arr) != n:
+                continue
+            new_dlg = [dlg_arr[order[i]] for i in range(n)]
+            new_aw = [aw_arr[order[i]] for i in range(n)]
+            dlg_arr[:] = new_dlg
+            aw_arr[:] = new_aw
+        self._load_layout_sequence_into_ui()
+        self.createEventbuttonTable()
+        self.aw.realignbuttons()
+
+    def _parse_roles_to_rows(self) -> tuple[list[list[int]], list[int]]:
+        """Build rows and unassigned from extraeventslayoutroles/values/visibility.
+        Returns (rows, unassigned). rows is list of at most NUM_BUTTON_ROWS lists of slot indices (button or spacer).
+        unassigned is list of button slot indices with visibility False (and overflow from rows beyond NUM_BUTTON_ROWS)."""
+        roles = getattr(self, 'extraeventslayoutroles', [])
+        vis = getattr(self, 'extraeventsvisibility', [])
+        n = len(getattr(self, 'extraeventstypes', []))
+        if n == 0:
+            return ([[]] * NUM_BUTTON_ROWS, [])
+        while len(roles) < n:
+            roles.append(0)
+        while len(vis) < n:
+            vis.append(1)
+        rows_parsed = []
+        unassigned = []
+        current_row = []
+        for i in range(n):
+            r = roles[i] if i < len(roles) else 0
+            v = vis[i] if i < len(vis) else 1
+            if r == 2:
+                if current_row:
+                    rows_parsed.append(current_row)
+                    current_row = []
+            elif r == 1:
+                if v:
+                    current_row.append(i)
+                else:
+                    unassigned.append(i)
+            else:
+                if v:
+                    current_row.append(i)
+                else:
+                    unassigned.append(i)
+        if current_row:
+            rows_parsed.append(current_row)
+        rows_ui = []
+        for r in range(NUM_BUTTON_ROWS):
+            rows_ui.append(rows_parsed[r][:] if r < len(rows_parsed) else [])
+        for r in range(NUM_BUTTON_ROWS, len(rows_parsed)):
+            for idx in rows_parsed[r]:
+                unassigned.append(idx)
+        return (rows_ui, unassigned)
+
+    def _render_rows_ui(self, rows: list[list[int]], unassigned: list[int]) -> None:
+        """Fill Row 1..Row N and Unassigned lists from parsed rows/unassigned."""
+        if not hasattr(self, 'rowListWidgets') or not self.rowListWidgets:
+            return
+        n = len(getattr(self, 'extraeventstypes', []))
+        labels = getattr(self, 'extraeventslabels', [''] * n)
+        values = getattr(self, 'extraeventsvalues', [20.0] * n)
+        roles = getattr(self, 'extraeventslayoutroles', [0] * n)
+        for w in self.rowListWidgets + [self.unassignedListWidget]:
+            w.clear()
+        for r, slot_list in enumerate(rows):
+            if r >= len(self.rowListWidgets):
+                break
+            for idx in slot_list:
+                role = roles[idx] if idx < len(roles) else 0
+                kind = 'spacer' if role == 1 else 'button'
+                if kind == 'spacer':
+                    px = int(values[idx]) if idx < len(values) and values[idx] > 0 else 20
+                    text = QApplication.translate('Label', 'Spacer') + ': %d px' % px
+                else:
+                    lab = (labels[idx] if idx < len(labels) else '') or ('E%d' % (idx + 1))
+                    text = 'E%d: %s' % (idx + 1, lab)
+                it = QListWidgetItem(text)
+                it.setData(Qt.ItemDataRole.UserRole, _extraevent_slot_user_role(idx, kind))
+                self.rowListWidgets[r].addItem(it)
+        for idx in unassigned:
+            if idx < 0 or idx >= n:
+                continue
+            lab = (labels[idx] if idx < len(labels) else '') or ('E%d' % (idx + 1))
+            text = 'E%d: %s' % (idx + 1, lab)
+            it = QListWidgetItem(text)
+            it.setData(Qt.ItemDataRole.UserRole, _extraevent_slot_user_role(idx, 'button'))
+            self.unassignedListWidget.addItem(it)
+
+    def _reorder_all_extraevent_arrays(self, new_order: list[int]) -> None:
+        """Reorder all slot-based arrays so that new_order[i] is the slot index that becomes position i."""
+        n = len(new_order)
+        if n != len(self.extraeventstypes):
+            return
+        arrays_to_reorder = (
+            self.extraeventslabels,
+            self.extraeventsdescriptions,
+            self.extraeventstypes,
+            self.extraeventsvalues,
+            self.extraeventsactions,
+            self.extraeventsactionstrings,
+            self.extraeventsvisibility,
+            self.extraeventbuttoncolor,
+            self.extraeventbuttontextcolor,
+            self.extraeventslayoutroles,
+        )
+        for arr in arrays_to_reorder:
+            if len(arr) != n:
+                continue
+            copy_arr = arr[:]
+            for i in range(n):
+                arr[i] = copy_arr[new_order[i]]
+
+    def _update_rows_visibility_by_count(self) -> None:
+        """Show Row 1..N, hide Row N+1..10 based on rowsCountSpin."""
+        if not hasattr(self, 'rowsCountSpin') or not hasattr(self, 'rowListWidgets'):
+            return
+        n = self.rowsCountSpin.value()
+        for r in range(NUM_BUTTON_ROWS):
+            self.rowListWidgets[r].setVisible(r < n)
+
+    @pyqtSlot(int)
+    def _rows_count_changed(self, _value: int) -> None:
+        self._rows_ui_dirty = True
+        self._update_rows_visibility_by_count()
+        self._rows_ui_to_model_apply()
+
+    def _rows_ui_to_model_apply(self) -> None:
+        """Read first N row lists (from rowsCountSpin) and Unassigned, rebuild model order and visibility, reorder arrays."""
+        if not hasattr(self, 'rowListWidgets') or not self.rowListWidgets:
+            return
+        total_items = sum(w.count() for w in self.rowListWidgets) + (self.unassignedListWidget.count() if hasattr(self, 'unassignedListWidget') else 0)
+        if total_items == 0:
+            return
+        n = len(self.extraeventstypes)
+        if n == 0:
+            return
+        N = self.rowsCountSpin.value() if hasattr(self, 'rowsCountSpin') else NUM_BUTTON_ROWS
+        N = max(1, min(N, NUM_BUTTON_ROWS))
+        roles = getattr(self, 'extraeventslayoutroles', [0] * n)
+        row_break_slots = [i for i in range(n) if (roles[i] if i < len(roles) else 0) == 2]
+        need_count = N - 1
+        while len(row_break_slots) < need_count:
+            bindex = len(self.extraeventstypes)
+            self.extraeventslabels.insert(bindex, '(row break)')
+            self.extraeventsdescriptions.insert(bindex, '')
+            self.extraeventstypes.insert(bindex, 4)
+            self.extraeventsvalues.insert(bindex, 0.)
+            self.extraeventsactions.insert(bindex, 0)
+            self.extraeventsactionstrings.insert(bindex, '')
+            self.extraeventsvisibility.insert(bindex, 1)
+            self.extraeventbuttoncolor.insert(bindex, '#808080')
+            self.extraeventbuttontextcolor.insert(bindex, 'white')
+            self.extraeventslayoutroles.insert(bindex, 2)
+            row_break_slots.append(bindex)
+            n = len(self.extraeventstypes)
+        row_break_slots = row_break_slots[:need_count]
+        added: set[int] = set()
+        new_order: list[int] = []
+        vis_len = len(self.extraeventsvisibility)
+        for r in range(N):
+            w = self.rowListWidgets[r]
+            for i in range(w.count()):
+                it = w.item(i)
+                if it is None:
+                    continue
+                sid, _ = _parse_extraevent_slot_user_role(it.data(Qt.ItemDataRole.UserRole))
+                if sid is not None and sid not in added:
+                    added.add(sid)
+                    new_order.append(sid)
+                    if sid < vis_len:
+                        self.extraeventsvisibility[sid] = 1
+            if r < N - 1 and r < len(row_break_slots):
+                rb = row_break_slots[r]
+                if rb not in added:
+                    added.add(rb)
+                    new_order.append(rb)
+        for i in range(self.unassignedListWidget.count()):
+            it = self.unassignedListWidget.item(i)
+            if it is None:
+                continue
+            sid, _ = _parse_extraevent_slot_user_role(it.data(Qt.ItemDataRole.UserRole))
+            if sid is not None and sid not in added:
+                added.add(sid)
+                new_order.append(sid)
+                if sid < vis_len:
+                    self.extraeventsvisibility[sid] = 0
+        for r in range(N, NUM_BUTTON_ROWS):
+            w = self.rowListWidgets[r]
+            for i in range(w.count()):
+                it = w.item(i)
+                if it is None:
+                    continue
+                sid, _ = _parse_extraevent_slot_user_role(it.data(Qt.ItemDataRole.UserRole))
+                if sid is not None and sid not in added:
+                    added.add(sid)
+                    new_order.append(sid)
+                    if sid < vis_len:
+                        self.extraeventsvisibility[sid] = 0
+        for i in range(len(self.extraeventstypes)):
+            if i not in added:
+                added.add(i)
+                new_order.append(i)
+                if i < vis_len:
+                    self.extraeventsvisibility[i] = 0
+        if len(new_order) != len(self.extraeventstypes):
+            return
+        self._reorder_all_extraevent_arrays(new_order)
+        for attr in ('extraeventslabels', 'extraeventsdescriptions', 'extraeventstypes', 'extraeventsvalues',
+                     'extraeventsactions', 'extraeventsactionstrings', 'extraeventsvisibility',
+                     'extraeventbuttoncolor', 'extraeventbuttontextcolor', 'extraeventslayoutroles'):
+            setattr(self.aw, attr, getattr(self, attr)[:])
+        self.createEventbuttonTable()
+        rows, unassigned = self._parse_roles_to_rows()
+        self._render_rows_ui(rows, unassigned)
+        self.extraeventbuttonsCompactLayoutCheckBox.setChecked(True)
+        self.aw.extraeventbuttonsCompactLayout = True
+        self._rows_ui_dirty = False
+        self.aw.realignbuttons()
+        self.aw.update_extraeventbuttons_visibility()
+
+    def _rows_ui_changed(self) -> None:
+        """After DnD in row lists: rebuild model from UI and refresh bar."""
+        self._rows_ui_dirty = True
+        self._rows_ui_to_model_apply()
+
+    @pyqtSlot()
+    def _row_add_spacer(self) -> None:
+        """Add spacer to selected Row list (or Row 1)."""
+        self._rows_ui_dirty = True
+        if not hasattr(self, 'rowListWidgets'):
+            return
+        target = None
+        for w in self.rowListWidgets:
+            if w.hasFocus() or w.currentItem() is not None:
+                target = w
+                break
+        if target is None:
+            target = self.rowListWidgets[0]
+        if len(self.extraeventstypes) >= self.aw.buttonlistmaxlen * self.aw.max_palettes:
+            return
+        bindex = len(self.extraeventstypes)
+        self.extraeventslabels.insert(bindex, '(spacer)')
+        self.extraeventsdescriptions.insert(bindex, '')
+        self.extraeventstypes.insert(bindex, 4)
+        self.extraeventsvalues.insert(bindex, 20.0)
+        self.extraeventsactions.insert(bindex, 0)
+        self.extraeventsactionstrings.insert(bindex, '')
+        self.extraeventsvisibility.insert(bindex, 1)
+        self.extraeventbuttoncolor.insert(bindex, '#808080')
+        self.extraeventbuttontextcolor.insert(bindex, 'white')
+        self.extraeventslayoutroles.insert(bindex, 1)
+        it = QListWidgetItem(QApplication.translate('Label', 'Spacer') + ': 20 px')
+        it.setData(Qt.ItemDataRole.UserRole, _extraevent_slot_user_role(bindex, 'spacer'))
+        row = target.currentRow()
+        if row >= 0:
+            target.insertItem(row, it)
+        else:
+            target.addItem(it)
+        self._rows_ui_to_model_apply()
+
+    @pyqtSlot()
+    def _row_edit_spacer(self) -> None:
+        """Edit px of selected spacer."""
+        slot_index = self._get_selected_spacer_slot()
+        if slot_index is None:
+            return
+        n = len(self.extraeventsvalues)
+        if slot_index >= n:
+            return
+        current = int(self.extraeventsvalues[slot_index]) if self.extraeventsvalues[slot_index] > 0 else 20
+        val, ok = QInputDialog.getInt(self, QApplication.translate('Dialog', 'Spacer'), QApplication.translate('Label', 'Width (px):'), current, 0, 1000, 1)
+        if not ok:
+            return
+        self.extraeventsvalues[slot_index] = float(max(0, val))
+        self._rows_ui_dirty = True
+        rows, unassigned = self._parse_roles_to_rows()
+        self._render_rows_ui(rows, unassigned)
+        self.savetableextraeventbutton()
+
+    @pyqtSlot()
+    def _row_delete_spacer(self) -> None:
+        """Remove selected spacer from model and UI."""
+        self._rows_ui_dirty = True
+        slot_index = self._get_selected_spacer_slot()
+        if slot_index is None:
+            return
+        n = len(self.extraeventstypes)
+        if slot_index < 0 or slot_index >= n:
+            return
+        for arr in (self.extraeventslabels, self.extraeventsdescriptions, self.extraeventstypes, self.extraeventsvalues,
+                   self.extraeventsactions, self.extraeventsactionstrings, self.extraeventsvisibility,
+                   self.extraeventbuttoncolor, self.extraeventbuttontextcolor, self.extraeventslayoutroles):
+            if slot_index < len(arr):
+                arr.pop(slot_index)
+        rows, unassigned = self._parse_roles_to_rows()
+        self._render_rows_ui(rows, unassigned)
+        self.createEventbuttonTable()
+        self.savetableextraeventbutton()
+
+    def _get_selected_spacer_slot(self) -> int | None:
+        """Return slot index of selected spacer item, or None."""
+        for w in self.rowListWidgets:
+            it = w.currentItem()
+            if it is None:
+                continue
+            sid, kind = _parse_extraevent_slot_user_role(it.data(Qt.ItemDataRole.UserRole))
+            if kind == 'spacer' and sid is not None:
+                return sid
+        return None
+
+    @pyqtSlot()
+    def _row_list_selection_changed(self) -> None:
+        """Enable/disable Edit spacer / Delete spacer based on selection."""
+        if not hasattr(self, 'rowEditSpacerButton'):
+            return
+        has_spacer = self._get_selected_spacer_slot() is not None
+        self.rowEditSpacerButton.setEnabled(has_spacer)
+        self.rowDeleteSpacerButton.setEnabled(has_spacer)
+
+    @pyqtSlot(QListWidgetItem)
+    def _row_list_item_double_clicked(self, item: QListWidgetItem) -> None:
+        """Open Edit spacer when double-clicking a spacer item."""
+        if item is None:
+            return
+        sid, kind = _parse_extraevent_slot_user_role(item.data(Qt.ItemDataRole.UserRole))
+        if kind == 'spacer' and sid is not None:
+            self._row_edit_spacer()
+
+    def decks_move_left(self) -> None:
+        order = list(getattr(self.aw, 'eventsDecksPanelOrder', ['deck_left', 'buttons', 'deck_right']))
+        pid = self.decksPanelCombo.currentData()
+        if not pid or pid not in order:
+            return
+        i = order.index(pid)
+        if i <= 0:
+            return
+        order[i], order[i - 1] = order[i - 1], order[i]
+        self.aw.eventsDecksPanelOrder = order
+        self._update_decks_order_label()
+        self.aw.applyEventSliderLayout()
+
+    def decks_move_right(self) -> None:
+        order = list(getattr(self.aw, 'eventsDecksPanelOrder', ['deck_left', 'buttons', 'deck_right']))
+        pid = self.decksPanelCombo.currentData()
+        if not pid or pid not in order:
+            return
+        i = order.index(pid)
+        if i >= len(order) - 1:
+            return
+        order[i], order[i + 1] = order[i + 1], order[i]
+        self.aw.eventsDecksPanelOrder = order
+        self._update_decks_order_label()
+        self.aw.applyEventSliderLayout()
+
     def saveSliderSettings(self) -> None:
         self.aw.eventslidervisibilities[0] = int(self.E1visibility.isChecked())
         self.aw.eventslidervisibilities[1] = int(self.E2visibility.isChecked())
@@ -3539,12 +4546,15 @@ class EventsDlg(ArtisanResizeablDialog):
         self.aw.updateSliderMinMax()
         self.aw.slidersAction.setEnabled(any(self.aw.eventslidervisibilities) or self.aw.pidcontrol.svSlider)
         mode = self.sliderContainerModeComboBox.currentData()
-        if mode in ('dock_left', 'dock_bottom', 'embedded'):
+        if mode in ('dock_left', 'dock_right', 'dock_bottom', 'embedded'):
             self.aw.eventsliderContainerMode = mode
-            self.aw.eventsliderDockPosition = 'bottom' if mode == 'dock_bottom' else 'left'
+            self.aw.eventsliderDockPosition = 'right' if mode == 'dock_right' else ('bottom' if mode == 'dock_bottom' else 'left')
         layout_mode = self.sliderLayoutModeComboBox.currentData()
-        if layout_mode in ('auto', 'vertical', 'horizontal'):
+        if layout_mode in ('auto', 'vertical', 'horizontal', 'decks'):
             self.aw.eventsliderLayoutMode = layout_mode
+        self.aw.eventsDecksLayoutLocked = self.decksLockFlag.isChecked()
+        if layout_mode == 'decks':
+            self.aw.eventsDecksConfig = self._sanitize_decks_config(self._build_decks_config_from_ui())
         self.aw.applyEventSliderContainerMode()
 
     def saveQuantifierSettings(self) -> None:
@@ -3620,6 +4630,9 @@ class EventsDlg(ArtisanResizeablDialog):
         self.eventsliderKeyboardControlstored = self.aw.eventsliderKeyboardControl
         self.eventsliderAlternativeLayoutstored = self.aw.eventsliderAlternativeLayout
         self.eventsliderLayoutModestored = getattr(self.aw, 'eventsliderLayoutMode', 'auto')
+        self.eventsDecksPanelOrderstored = getattr(self.aw, 'eventsDecksPanelOrder', ['deck_left', 'buttons', 'deck_right'])[:]
+        self.eventsDecksLayoutLockedstored = getattr(self.aw, 'eventsDecksLayoutLocked', False)
+        self.eventsDecksConfigstored = copy.deepcopy(getattr(self.aw, 'eventsDecksConfig', self._events_decks_config_default()))
         # buttons
         self.extraeventslabels = self.aw.extraeventslabels[:]
         self.extraeventsdescriptions = self.aw.extraeventsdescriptions[:]
@@ -3704,6 +4717,10 @@ class EventsDlg(ArtisanResizeablDialog):
         self.aw.eventsliderKeyboardControl = self.eventsliderKeyboardControlstored
         self.aw.eventsliderAlternativeLayout = self.eventsliderAlternativeLayoutstored
         self.aw.eventsliderLayoutMode = self.eventsliderLayoutModestored
+        self.aw.eventsDecksPanelOrder = self.eventsDecksPanelOrderstored[:]
+        self.aw.eventsDecksLayoutLocked = self.eventsDecksLayoutLockedstored
+        self.aw.eventsDecksConfig = copy.deepcopy(self.eventsDecksConfigstored)
+        self._load_decks_config_into_ui(self.aw.eventsDecksConfig)
         self.aw.applyEventSliderLayout()
         # buttons saved only if ok is pressed, so no restore needed
         self.aw.buttonlistmaxlen = self.buttonlistmaxlen
@@ -3788,6 +4805,7 @@ class EventsDlg(ArtisanResizeablDialog):
                 self.aw.buttonCOOL.setVisible(bool(self.aw.qmc.buttonvisibility[7]))
                 #save sliders
                 self.saveSliderSettings()
+                self.aw.extraeventbuttonsCompactLayout = self.extraeventbuttonsCompactLayoutCheckBox.isChecked()
                 self.saveQuantifierSettings()
                 # save palette label
                 self.aw.buttonpalette_label = self.transferpalettecurrentLabelEdit.text()
@@ -3840,7 +4858,9 @@ class EventsDlg(ArtisanResizeablDialog):
                 self.aw.updateSlidersProperties() # set visibility and event names on slider widgets
                 #save special event annotations
                 self.saveAnnotationsSettings()
-                self.aw.extraeventbuttonsCompactLayout = self.extraeventbuttonsCompactLayoutCheckBox.isChecked()
+                if hasattr(self, 'rowListWidgets') and self.rowListWidgets:
+                    if getattr(self, '_rows_ui_initialized', False) and getattr(self, '_rows_ui_dirty', False):
+                        self._rows_ui_to_model_apply()
                 self.savetableextraeventbutton()
 
 
@@ -3906,6 +4926,11 @@ class EventsDlg(ArtisanResizeablDialog):
         settings.setValue('EventsGeometry',self.saveGeometry())
         self.aw.EventsDlg_activeTab = self.TabWidget.currentIndex()
         self.aw.qmc.ensure_hover_connected()
+
+    @override
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        self._load_decks_config_into_ui()
 
     @pyqtSlot(bool)
     def showEventbuttonhelp(self, _:bool = False) -> None:

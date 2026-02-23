@@ -40,6 +40,7 @@ import threading
 import multiprocessing
 import re
 import io
+import json
 import functools
 import dateutil.parser
 import copy as copyd
@@ -107,7 +108,7 @@ QtWebEngineSupport:bool = False # set to True if the QtWebEngine was successfull
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QMessageBox, QLabel, QMainWindow, QFileDialog, QGraphicsDropShadowEffect,
                          QInputDialog, QGroupBox, QLineEdit,
-                         QSizePolicy, QVBoxLayout, QHBoxLayout, QPushButton,
+                         QSizePolicy, QBoxLayout, QVBoxLayout, QHBoxLayout, QPushButton,
                          QLCDNumber, QSpinBox, QComboBox,
                          QSlider,
                          QColorDialog, QFrame, QScrollArea, QProgressDialog,
@@ -115,11 +116,12 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QMessageBox, QLabel, QMainWi
 from PyQt6.QtGui import (QScreen, QPageLayout, QAction, QImageReader, QWindow,
                             QKeySequence, QShortcut,
                             QPixmap,QColor,QDesktopServices,QIcon,
-                            QRegularExpressionValidator, QDoubleValidator, QPainter, QCursor)
+                            QRegularExpressionValidator, QDoubleValidator, QPainter, QCursor, QDrag)
 from PyQt6.QtPrintSupport import (QPrinter,QPrintDialog)
 from PyQt6.QtCore import (QStandardPaths, QLibraryInfo, QTranslator, QLocale, QFileInfo, PYQT_VERSION_STR, pyqtSignal, pyqtSlot, QtMsgType,
                           qVersion, QVersionNumber, QTime, QTimer, QFile, QIODevice, QTextStream, QSettings,
-                          QRegularExpression, QDate, QUrl, QUrlQuery, QDir, Qt, QPoint, QEvent, QDateTime, QThread, qInstallMessageHandler)
+                          QRegularExpression, QDate, QUrl, QUrlQuery, QDir, Qt, QPoint, QEvent, QDateTime, QThread, qInstallMessageHandler,
+                          QMimeData, QByteArray)
 from PyQt6.QtNetwork import QLocalSocket
 
 #QtWebEngineWidgets must be imported before a QCoreApplication instance is created
@@ -1391,6 +1393,44 @@ class UI_MODE(IntEnum):
     DEFAULT = 2
     PRODUCTION = 3
 
+# Mime type for deck slider DnD (same as events.SLIDER_DECK_MIME)
+SLIDER_DECK_MIME = 'application/x-artisan-slider-idx'
+
+
+class DeckDropFrame(QFrame):
+    """QFrame that accepts drop of deck slider (by index). Used for deck_left, deck_right, deck_sv, and 'hidden' (extrabuttondialogs)."""
+    def __init__(self, parent: QWidget | None, deck_id: str, aw: 'ApplicationWindow') -> None:
+        super().__init__(parent)
+        self._deck_id = deck_id
+        self._aw = aw
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasFormat(SLIDER_DECK_MIME):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasFormat(SLIDER_DECK_MIME):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        if not event.mimeData().hasFormat(SLIDER_DECK_MIME):
+            super().dropEvent(event)
+            return
+        data = event.mimeData().data(SLIDER_DECK_MIME).data().decode('utf-8')
+        try:
+            slider_idx = int(data)
+        except ValueError:
+            super().dropEvent(event)
+            return
+        if 0 <= slider_idx <= 4:
+            self._aw._deck_slider_dropped(self._deck_id, slider_idx)
+        event.acceptProposedAction()
+
+
 # NOTE: to have pylint to verify proper __slot__ definitions with pylint one has to remove the super class QMainWindow here temporarily
 #   as this class does not has __slot__ definitions and thus __dict__ is contained which suppresses the warnings
 #class ApplicationWindow():
@@ -1493,7 +1533,7 @@ class ApplicationWindow(QMainWindow):
         'extraControlVisibility1', 'extraControlVisibility2',
         'extraDelta1', 'extraDelta2', 'extraFill1', 'extraFill2', 'channel_tare_values', 'messagehist', 'eventlabel', 'eNumberSpinBox',
         'extraDelta1b', 'extraDelta2b',
-        'lineEvent', 'etypeComboBox', 'valueEdit', 'etimeline', 'buttonminiEvent', 'buttonlist', 'buttonStates', 'lastbuttonpressed', 'buttonlistmaxlen',
+        'lineEvent', 'etypeComboBox', 'valueEdit', 'etimeline', 'buttonminiEvent', 'buttonlist', 'buttonStates', 'lastbuttonpressed', 'buttonlistmaxlen', 'extraeventbuttonsCompactLayout',
         'buttonpalette_default_label', 'buttonpalette_label', 'buttonpalettemaxlen_min', 'buttonpalettemaxlen_max',
         'buttonpalettemaxlen_default', 'buttonpalettemaxlen', 'buttonpalette_shortcuts', 'buttonsize_default', 'buttonsize',
         'mark_last_button_pressed_default', 'mark_last_button_pressed', 'show_extrabutton_tooltips_default', 'show_extrabutton_tooltips',
@@ -1507,7 +1547,7 @@ class ApplicationWindow(QMainWindow):
         'DRYlabel', 'DRYlcd', 'DRYlcdFrame', 'DRY2FCslabel', 'DRY2FCsframe', 'FCslabel', 'FCslcd', 'FCslcdFrame', 'AUClabel', 'AUClcd', 'AUClcdFrame',
         'AUCLCD', 'phasesLCDs', 'extrabuttonsLayout', 'extrabuttondialogs', 'slider1', 'slider2', 'slider3', 'slider4', 'sliderLCD1', 'sliderLCD2', 'sliderLCD3',
         'sliderLCD4', 'sliderGrpBox1', 'sliderGrpBox2', 'sliderGrpBox3', 'sliderGrpBox4', 'sliderSV', 'sliderLCDSV', 'sliderGrpBoxSV', 'leftlayout',
-        'sliderFrame', 'sliderDock', 'eventsBottomLeftContainer', 'eventsBottomHSplitter', 'lcdFrame', 'midlayout', 'editgraphdialog', 'html_loader', 'QtWebEngineSupport', 'artisanviewerFirstStart',
+        'sliderFrame', 'sliderDock', 'eventsBottomLeftContainer', 'eventsBottomHSplitter', 'eventsDeckLeftPanel', 'eventsDeckRightPanel', 'eventsDeckSVPanel', '_eventsDeckHiddenContainer', 'eventsDecksPanelOrder', 'eventsDecksConfig', 'eventsDecksLayoutLocked', '_eventsDecksSplitterState', '_eventsBottomHSplitterState', '_eventsBottomHSplitterHandleWidthDefault', 'lcdFrame', 'midlayout', 'editgraphdialog', 'html_loader', 'QtWebEngineSupport', 'artisanviewerFirstStart',
         'buttonpalette', 'extraeventbuttontextcolor', 'extraeventsactions', 'extraeventsdescriptions', 'extraeventstypes', 'extraeventsvalues',
         'extraeventsvisibility', 'fileSaveAsAction', 'keyboardButtonStyles', 'language_menu_actions', 'loadThemeAction', 'main_button_min_width_str',
         'minieventleft', 'minieventright', 'notificationManager', 'notificationsflag', 'ntb', 'pdf_page_layout', 'pdf_rendering', 'productionPDFAction',
@@ -1907,7 +1947,6 @@ class ApplicationWindow(QMainWindow):
         #   2: right rounded
         #   3: rounded on both sides
         self.extraeventbuttonround:list[int] = [] # set by realignbuttons on rendering the button rows and read by setExtraEventButtonStyle to update the style
-        self.extraeventbuttonsCompactLayout:bool = False  # if True, only visible buttons in layout, left-aligned, no invisible gaps
         # Layout role per button record: 0=button, 1=spacer, 2=row_break. Same length as extraeventstypes; missing/legacy => zeros.
         self.extraeventslayoutroles:list[int] = []
 
@@ -1932,7 +1971,19 @@ class ApplicationWindow(QMainWindow):
         self.eventsliderAlternativeLayout:bool = self.eventsliderAlternativeLayout_default
         self.eventsliderDockPosition:str = 'left'  # 'left'|'bottom' (legacy, migrated to eventsliderContainerMode)
         self.eventsliderContainerMode:str = 'dock_left'  # 'dock_left'|'dock_bottom'|'embedded'
-        self.eventsliderLayoutMode:str = 'auto'  # 'auto'|'vertical'|'horizontal' (sliders layout/orientation)
+        self.eventsliderLayoutMode:str = 'auto'  # 'auto'|'vertical'|'horizontal'|'decks' (sliders layout/orientation)
+        self.eventsDecksPanelOrder:list[str] = ['deck_left', 'buttons', 'deck_right']
+        self.eventsDecksConfig:dict[str, Any] = {
+            'deck_left': {'orientation': 'vertical', 'sliders': [0, 1]},
+            'deck_right': {'orientation': 'horizontal', 'sliders': [2, 3, 4]},
+        }
+        self.eventsDecksLayoutLocked:bool = False
+        self._eventsDecksSplitterState:Any = None
+        self._deck_slider_lcd_drag_start_pos: QPoint | None = None
+        self._eventsDeckLeftInnerState:Any = None
+        self._eventsDeckRightInnerState:Any = None
+        self._eventsDeckSVInnerState:Any = None
+        self._eventsBottomHSplitterState:Any = None
         self.eventslideractions:list[int] = [0]*self.eventsliders # 0: None, 1: Serial Command, 2: Modbus Command, 3: DTA Command, 4: Call Program, 5: Hottop Heater, 6: Hottop Fan
         self.eventslidercommands:list[str] = ['']*self.eventsliders
         self.eventslideroffsets:list[float] = [0.0]*self.eventsliders
@@ -2689,6 +2740,11 @@ class ApplicationWindow(QMainWindow):
         self.slidersAction.triggered.connect(self.toggleSliders)
         self.slidersAction.setCheckable(True)
         self.slidersAction.setChecked(False)
+
+        self.editBottomLayoutAction: QAction = QAction(QApplication.translate('Menu', 'Edit bottom layout'), self)
+        self.editBottomLayoutAction.setCheckable(True)
+        self.editBottomLayoutAction.setChecked(not getattr(self, 'eventsDecksLayoutLocked', False))
+        self.editBottomLayoutAction.triggered.connect(self._toggle_edit_bottom_layout)
 
         self.scheduleAction: QAction = QAction(QApplication.translate('Menu', 'Schedule'), self)
         self.scheduleAction.triggered.connect(self.schedule)
@@ -3565,6 +3621,7 @@ class ApplicationWindow(QMainWindow):
         self.buttonpalettemaxlen_max: Final[int] = 50     # maximal numbers of buttons per row
         self.buttonpalettemaxlen_default: Final[int] = 14 # default number of buttons per row
         self.buttonlistmaxlen:int = self.buttonpalettemaxlen_default
+        self.extraeventbuttonsCompactLayout = False
         self.buttonpalettemaxlen:list[int] = [self.buttonpalettemaxlen_default]*self.max_palettes  #keeps max number of buttons per row per palette
         self.buttonpalette_shortcuts:bool = True # if True palettes can be changed via the number keys
         self.buttonsize_default: Final[int] = 1 # default button size; 0: tiny, 1: small (default), 2: large
@@ -3983,6 +4040,8 @@ class ApplicationWindow(QMainWindow):
         self.extrabuttonsLayout.addWidget(self.e8buttondialog)
         self.extrabuttonsLayout.addWidget(self.e9buttondialog)
         self.extrabuttonsLayout.addWidget(self.e10buttondialog)
+        self.extrabuttonsLayout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.extrabuttonsLayout.addStretch(1)
 
         self.e1buttondialog.setVisible(False)
         self.e2buttondialog.setVisible(False)
@@ -3995,8 +4054,9 @@ class ApplicationWindow(QMainWindow):
         self.e9buttondialog.setVisible(False)
         self.e10buttondialog.setVisible(False)
 
-        self.extrabuttondialogs = QFrame()
+        self.extrabuttondialogs = DeckDropFrame(self, 'hidden', self)
         self.extrabuttondialogs.setLayout(self.extrabuttonsLayout)
+        self.extrabuttondialogs.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self.extrabuttondialogs.setVisible(False)
 
         # Bottom panel under graphs: splitter with left slot for embedded sliders and right for extra buttons
@@ -4006,8 +4066,55 @@ class ApplicationWindow(QMainWindow):
         self.eventsBottomLeftContainer.setVisible(False)
         self.eventsBottomLeftContainer.setMaximumWidth(0)
         self.eventsBottomHSplitter = QSplitter(Qt.Orientation.Horizontal)
+        self.eventsBottomHSplitter.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self.eventsBottomHSplitter.addWidget(self.eventsBottomLeftContainer)
         self.eventsBottomHSplitter.addWidget(self.extrabuttondialogs)
+        self._eventsBottomHSplitterHandleWidthDefault = self.eventsBottomHSplitter.handleWidth()
+        self.eventsBottomHSplitter.setChildrenCollapsible(False)
+        try:
+            self.extrabuttondialogs.setMinimumWidth(max(180, self.extrabuttondialogs.sizeHint().width() // 2))
+        except Exception:  # pylint: disable=broad-except
+            self.extrabuttondialogs.setMinimumWidth(180)
+
+        # Deck panels for layout_mode == 'decks'; each panel has one inner QSplitter for resizable sliders
+        self.eventsDeckLeftPanel = DeckDropFrame(self, 'deck_left', self)
+        self.eventsDeckLeftInnerSplitter = QSplitter(Qt.Orientation.Vertical)
+        self.eventsDeckLeftInnerSplitter.setChildrenCollapsible(False)
+        _ly = QVBoxLayout()
+        _ly.setContentsMargins(0, 0, 0, 0)
+        _ly.setAlignment(Qt.AlignmentFlag.AlignTop)
+        _ly.addWidget(self.eventsDeckLeftInnerSplitter)
+        self.eventsDeckLeftPanel.setLayout(_ly)
+        self.eventsDeckLeftPanel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.eventsDeckLeftPanel.setVisible(False)
+        self.eventsDeckRightPanel = DeckDropFrame(self, 'deck_right', self)
+        self.eventsDeckRightInnerSplitter = QSplitter(Qt.Orientation.Horizontal)
+        self.eventsDeckRightInnerSplitter.setChildrenCollapsible(False)
+        _ly = QVBoxLayout()
+        _ly.setContentsMargins(0, 0, 0, 0)
+        _ly.setAlignment(Qt.AlignmentFlag.AlignTop)
+        _ly.addWidget(self.eventsDeckRightInnerSplitter)
+        self.eventsDeckRightPanel.setLayout(_ly)
+        self.eventsDeckRightPanel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.eventsDeckRightPanel.setVisible(False)
+        self.eventsDeckSVPanel = DeckDropFrame(self, 'deck_sv', self)
+        self.eventsDeckSVInnerSplitter = QSplitter(Qt.Orientation.Vertical)
+        self.eventsDeckSVInnerSplitter.setChildrenCollapsible(False)
+        _ly = QVBoxLayout()
+        _ly.setContentsMargins(0, 0, 0, 0)
+        _ly.setAlignment(Qt.AlignmentFlag.AlignTop)
+        _ly.addWidget(self.eventsDeckSVInnerSplitter)
+        self.eventsDeckSVPanel.setLayout(_ly)
+        self.eventsDeckSVPanel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.eventsDeckSVPanel.setVisible(False)
+
+        self._eventsDeckHiddenContainer = QFrame(self)
+        self._eventsDeckHiddenContainer.setVisible(False)
+        self._eventsDeckHiddenContainer.setMaximumSize(0, 0)
+        self._eventsDeckHiddenContainer.setObjectName('_eventsDeckHiddenContainer')
+        self.eventsDeckLeftPanel.setMinimumWidth(80)
+        self.eventsDeckRightPanel.setMinimumWidth(80)
+        self.eventsDeckSVPanel.setMinimumWidth(80)
 
         midleftlayout = QVBoxLayout()
         midleftlayout.setSpacing(0)
@@ -4018,6 +4125,8 @@ class ApplicationWindow(QMainWindow):
         midleftlayout.addWidget(self.eventsBottomHSplitter)
 
         midleftlayout.addWidget(self.EventsGroupLayout)
+        midleftlayout.setStretchFactor(level3layout, 1)
+        midleftlayout.setStretchFactor(self.eventsBottomHSplitter, 0)
 
         self.slider1:QSlider = self.slider()
         self.sliderLCD1:MyQLCDNumber = self.sliderLCD()
@@ -4026,16 +4135,17 @@ class ApplicationWindow(QMainWindow):
         sliderGrp1 = QVBoxLayout()
         sliderGrp1.addWidget(self.sliderLCD1)
         sliderGrp1.addWidget(self.slider1)
-        sliderGrp1.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sliderGrp1.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         sliderGrp1.setContentsMargins(0,7,0,0)
         sliderGrp1.setSpacing(0)
         self.sliderGrpBox1 = QGroupBox()
         self.sliderGrpBox1.setLayout(sliderGrp1)
-        self.sliderGrpBox1.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sliderGrpBox1.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.sliderGrpBox1.setMinimumWidth(55)
         self.sliderGrpBox1.setMaximumWidth(55)
         self.sliderGrpBox1.setVisible(False)
         self.sliderGrpBox1.setFlat(True)
+        self.sliderGrpBox1.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.sliderGrpBox1x = QVBoxLayout() # we had to add this extra layer of QVBoxLayout for alignment issues
         self.sliderGrpBox1x.addWidget(self.sliderGrpBox1)
         # tracking by default on (drives the LCD)
@@ -4056,16 +4166,17 @@ class ApplicationWindow(QMainWindow):
         sliderGrp2 = QVBoxLayout()
         sliderGrp2.addWidget(self.sliderLCD2)
         sliderGrp2.addWidget(self.slider2)
-        sliderGrp2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sliderGrp2.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         sliderGrp2.setContentsMargins(0,7,0,0)
         sliderGrp2.setSpacing(0)
         self.sliderGrpBox2 = QGroupBox()
         self.sliderGrpBox2.setLayout(sliderGrp2)
-        self.sliderGrpBox2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sliderGrpBox2.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.sliderGrpBox2.setMinimumWidth(55)
         self.sliderGrpBox2.setMaximumWidth(55)
         self.sliderGrpBox2.setVisible(False)
         self.sliderGrpBox2.setFlat(True)
+        self.sliderGrpBox2.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.sliderGrpBox2x = QVBoxLayout() # we had to add this extra layer of QVBoxLayout for alignment issues
         self.sliderGrpBox2x.addWidget(self.sliderGrpBox2)
         # tracking by default on (drives the LCD)
@@ -4086,16 +4197,17 @@ class ApplicationWindow(QMainWindow):
         sliderGrp3 = QVBoxLayout()
         sliderGrp3.addWidget(self.sliderLCD3)
         sliderGrp3.addWidget(self.slider3)
-        sliderGrp3.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sliderGrp3.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         sliderGrp3.setContentsMargins(0,7,0,0)
         sliderGrp3.setSpacing(0)
         self.sliderGrpBox3 = QGroupBox()
         self.sliderGrpBox3.setLayout(sliderGrp3)
-        self.sliderGrpBox3.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sliderGrpBox3.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.sliderGrpBox3.setMinimumWidth(55)
         self.sliderGrpBox3.setMaximumWidth(55)
         self.sliderGrpBox3.setVisible(False)
         self.sliderGrpBox3.setFlat(True)
+        self.sliderGrpBox3.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.sliderGrpBox3x = QVBoxLayout() # we had to add this extra layer of QVBoxLayout for alignment issues
         self.sliderGrpBox3x.addWidget(self.sliderGrpBox3)
         # tracking by default on (drives the LCD)
@@ -4116,16 +4228,17 @@ class ApplicationWindow(QMainWindow):
         sliderGrp4 = QVBoxLayout()
         sliderGrp4.addWidget(self.sliderLCD4)
         sliderGrp4.addWidget(self.slider4)
-        sliderGrp4.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sliderGrp4.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         sliderGrp4.setContentsMargins(0,7,0,0)
         sliderGrp4.setSpacing(0)
         self.sliderGrpBox4 = QGroupBox()
         self.sliderGrpBox4.setLayout(sliderGrp4)
-        self.sliderGrpBox4.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sliderGrpBox4.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.sliderGrpBox4.setMinimumWidth(55)
         self.sliderGrpBox4.setMaximumWidth(55)
         self.sliderGrpBox4.setVisible(False)
         self.sliderGrpBox4.setFlat(True)
+        self.sliderGrpBox4.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.sliderGrpBox4x = QVBoxLayout() # we had to add this extra layer of QVBoxLayout for alignment issues
         self.sliderGrpBox4x.addWidget(self.sliderGrpBox4)
         # tracking by default on (drives the LCD)
@@ -4149,17 +4262,18 @@ class ApplicationWindow(QMainWindow):
         sliderGrpSV = QVBoxLayout()
         sliderGrpSV.addWidget(self.sliderLCDSV)
         sliderGrpSV.addWidget(self.sliderSV)
-        sliderGrpSV.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sliderGrpSV.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         sliderGrpSV.setContentsMargins(0,7,0,0)
         sliderGrpSV.setSpacing(0)
         self.sliderGrpBoxSV: QGroupBox = QGroupBox()
         self.sliderGrpBoxSV.setLayout(sliderGrpSV)
-        self.sliderGrpBoxSV.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sliderGrpBoxSV.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.sliderGrpBoxSV.setMinimumWidth(55)
         self.sliderGrpBoxSV.setMaximumWidth(55)
         self.sliderGrpBoxSV.setVisible(False)
         self.sliderGrpBoxSV.setTitle(QApplication.translate('Label','SV'))
         self.sliderGrpBoxSV.setFlat(True)
+        self.sliderGrpBoxSV.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.sliderSV.valueChanged.connect(self.updateSVSliderLCD)
         self.sliderSV.sliderReleased.connect(self.sliderSVreleased)
         self.sliderSV.actionTriggered.connect(self.sliderSVactionTriggered)
@@ -4168,6 +4282,12 @@ class ApplicationWindow(QMainWindow):
         self.sliderSV.setFocusPolicy(Qt.FocusPolicy.StrongFocus) # ClickFocus TabFocus StrongFocus
         self.sliderLCDSV.clicked.connect(self.sliderSVlcdClicked)
         self.sliderLCDSV.double_clicked.connect(self.sliderSVlcdDoubleClicked)
+
+        # Deck slider DnD: use LCD as drag handle (property + eventFilter)
+        for idx, lcd in enumerate((self.sliderLCD1, self.sliderLCD2, self.sliderLCD3, self.sliderLCD4, self.sliderLCDSV)):
+            lcd.setProperty('deck_slider_idx', idx)
+            lcd.setMouseTracking(True)
+            lcd.installEventFilter(self)
 
         self.sliderGrp12 = QVBoxLayout()
         self.sliderGrp12.setSpacing(0)
@@ -4461,6 +4581,10 @@ class ApplicationWindow(QMainWindow):
             view_menu.addAction(self.buttonsAction)
         if self.ui_mode is not UI_MODE.PRODUCTION or self.slidersVisible():
             view_menu.addAction(self.slidersAction)
+        view_menu.addAction(self.editBottomLayoutAction)
+        in_decks_embedded = getattr(self, 'eventsliderLayoutMode', '') == 'decks' and getattr(self, 'eventsliderContainerMode', '') == 'embedded'
+        self.editBottomLayoutAction.setEnabled(in_decks_embedded)
+        self.editBottomLayoutAction.setChecked(not getattr(self, 'eventsDecksLayoutLocked', False))
         view_menu.addSeparator()
         view_menu.addAction(self.scheduleAction)
         if self.app.artisanviewerMode:
@@ -6434,6 +6558,9 @@ class ApplicationWindow(QMainWindow):
     # otherwise to standard layout
     def updateSliderLayout(self, alternativeLayout:bool) -> None:
         layout_mode = getattr(self, 'eventsliderLayoutMode', 'auto')
+        if layout_mode == 'decks':
+            self.applyEventSliderLayout()
+            return
         container = getattr(self, 'eventsliderContainerMode', 'dock_left')
         effective = ('vertical' if container == 'dock_left' else 'horizontal') if layout_mode == 'auto' else layout_mode
         if effective == 'horizontal':
@@ -11773,9 +11900,15 @@ class ApplicationWindow(QMainWindow):
         if getattr(self, 'eventsliderContainerMode', 'dock_left').startswith('dock_'):
             self.sliderDock.setVisible(False)
         else:
-            self.sliderFrame.setVisible(False)
-            self.eventsBottomLeftContainer.setVisible(False)
-            self.eventsBottomLeftContainer.setMaximumWidth(0)
+            if getattr(self, 'eventsliderLayoutMode', 'auto') == 'decks':
+                self._eventsDecksSplitterState = self.eventsBottomHSplitter.saveState()
+                self.eventsDeckLeftPanel.setVisible(False)
+                self.eventsDeckRightPanel.setVisible(False)
+                self.eventsDeckSVPanel.setVisible(False)
+            else:
+                self.sliderFrame.setVisible(False)
+                self.eventsBottomLeftContainer.setVisible(False)
+                self.eventsBottomLeftContainer.setMaximumWidth(0)
         self.slidersAction.setChecked(False)
         # remember state
         if changeDefault:
@@ -11794,9 +11927,20 @@ class ApplicationWindow(QMainWindow):
             if getattr(self, 'eventsliderContainerMode', 'dock_left').startswith('dock_'):
                 self.sliderDock.setVisible(True)
             else:
-                self.eventsBottomLeftContainer.setMaximumWidth(16777215)
-                self.eventsBottomLeftContainer.setVisible(True)
-                self.sliderFrame.setVisible(True)
+                if getattr(self, 'eventsliderLayoutMode', 'auto') == 'decks':
+                    self.eventsDeckLeftPanel.setVisible(True)
+                    self.eventsDeckRightPanel.setVisible(True)
+                    self.eventsDeckSVPanel.setVisible(False)
+                    if getattr(self, '_eventsDecksSplitterState', None) is not None:
+                        try:
+                            self.eventsBottomHSplitter.restoreState(self._eventsDecksSplitterState)
+                            self._ensure_events_decks_splitter_sane_sizes()
+                        except Exception:  # pylint: disable=broad-except
+                            pass
+                else:
+                    self.eventsBottomLeftContainer.setMaximumWidth(16777215)
+                    self.eventsBottomLeftContainer.setVisible(True)
+                    self.sliderFrame.setVisible(True)
             focused_widget = QApplication.focusWidget()
             if focused_widget and focused_widget != self.centralWidget():
                 focused_widget.clearFocus()
@@ -11841,7 +11985,7 @@ class ApplicationWindow(QMainWindow):
             _log.exception(e)
 
     def applyEventSliderContainerMode(self) -> None:
-        """Apply event slider container mode: dock_left, dock_bottom, or embedded under graphs."""
+        """Apply event slider container mode: dock_left, dock_right, dock_bottom, or embedded under graphs."""
         try:
             mode = getattr(self, 'eventsliderContainerMode', 'dock_left')
             left_layout = self.eventsBottomLeftContainer.layout()
@@ -11851,7 +11995,6 @@ class ApplicationWindow(QMainWindow):
                 # Move sliderFrame from dock to bottom panel left slot
                 if self.sliderDock.widget() is self.sliderFrame:
                     self.sliderDock.setWidget(self._sliderDockPlaceholder)
-                    self.sliderFrame.setParent(None)
                     left_layout.addWidget(self.sliderFrame)
                 self.eventsBottomLeftContainer.setMaximumWidth(16777215)  # allow visible width
                 self.eventsBottomLeftContainer.setVisible(True)
@@ -11864,11 +12007,11 @@ class ApplicationWindow(QMainWindow):
                 # Dock mode: ensure sliderFrame is in sliderDock
                 if self.sliderFrame.parent() is self.eventsBottomLeftContainer:
                     left_layout.removeWidget(self.sliderFrame)
-                    self.sliderFrame.setParent(None)
                     self.sliderDock.setWidget(self.sliderFrame)
                 self.eventsBottomLeftContainer.setVisible(False)
                 self.eventsBottomLeftContainer.setMaximumWidth(0)
-                area = (Qt.DockWidgetArea.BottomDockWidgetArea if mode == 'dock_bottom' else Qt.DockWidgetArea.LeftDockWidgetArea)
+                area = (Qt.DockWidgetArea.RightDockWidgetArea if mode == 'dock_right' else
+                        (Qt.DockWidgetArea.BottomDockWidgetArea if mode == 'dock_bottom' else Qt.DockWidgetArea.LeftDockWidgetArea))
                 self.removeDockWidget(self.sliderDock)
                 self.addDockWidget(area, self.sliderDock)
                 self.sliderDock.setVisible(self.slidersVisible())
@@ -11876,19 +12019,487 @@ class ApplicationWindow(QMainWindow):
         except Exception as e: # pylint: disable=broad-except
             _log.exception(e)
 
+    def _is_events_bottom_splitter_in_decks(self) -> bool:
+        """True if eventsBottomHSplitter currently has Left or Right deck panel among its children (decks layout; no SV panel)."""
+        sp = self.eventsBottomHSplitter
+        deck_panels = (self.eventsDeckLeftPanel, self.eventsDeckRightPanel)
+        for i in range(sp.count()):
+            w = sp.widget(i)
+            if w in deck_panels:
+                return True
+        return False
+
+    def _ensure_events_decks_splitter_sane_sizes(self) -> None:
+        """Enforce minimum widths after restoreState so deck/buttons panels do not stick at 80/0."""
+        if not self._is_events_bottom_splitter_in_decks():
+            return
+        sp = self.eventsBottomHSplitter
+        n = sp.count()
+        if n == 0:
+            return
+        sizes = list(sp.sizes())
+        if len(sizes) != n:
+            return
+        min_widths = []
+        for i in range(n):
+            w = sp.widget(i)
+            if w is self.extrabuttondialogs:
+                min_widths.append(180)
+            elif w is self.eventsDeckLeftPanel or w is self.eventsDeckRightPanel:
+                min_widths.append(80)
+            else:
+                min_widths.append(0)
+        if len(min_widths) != n:
+            return
+        need_fix = any(sizes[i] < min_widths[i] for i in range(n))
+        if not need_fix:
+            return
+        new_sizes = [max(min_widths[i], sizes[i]) for i in range(n)]
+        if sum(new_sizes) > 0:
+            sp.setSizes(new_sizes)
+
+    def _ensure_events_bottom_splitter_standard_sane_sizes(self) -> None:
+        """Enforce minimum widths for standard 2-widget splitter (left container + extrabuttondialogs) after restoreState."""
+        sp = self.eventsBottomHSplitter
+        if sp.count() != 2:
+            return
+        if sp.widget(0) is not self.eventsBottomLeftContainer or sp.widget(1) is not self.extrabuttondialogs:
+            return
+        min_left, min_buttons = 120, 180
+        sizes = list(sp.sizes())
+        if len(sizes) != 2:
+            return
+        need_fix = sizes[0] < min_left or sizes[1] < min_buttons
+        if not need_fix:
+            return
+        new_sizes = [max(min_left, sizes[0]), max(min_buttons, sizes[1])]
+        if sum(new_sizes) > 0:
+            sp.setSizes(new_sizes)
+
+    def _stash_widget(self, w: QWidget | None) -> None:
+        """Reparent widget to hidden stash so it never becomes a top-level window."""
+        if w is None:
+            return
+        try:
+            w.setWindowFlags(Qt.WindowType.Widget)
+        except Exception:  # pylint: disable=broad-except
+            pass
+        w.setParent(self._eventsDeckHiddenContainer)
+
+    def _decks_assigned_indices(self) -> set[int]:
+        """Return set of slider indices (0..4) that are assigned to any deck (not Hidden)."""
+        config = getattr(self, 'eventsDecksConfig', None) or {}
+        assigned: set[int] = set()
+        for deck_id in ('deck_left', 'deck_right'):
+            deck_cfg = config.get(deck_id) or {}
+            for idx in deck_cfg.get('sliders') or []:
+                if isinstance(idx, int) and 0 <= idx <= 4:
+                    assigned.add(idx)
+        return assigned
+
+    def _migrate_decks_config_drop_sv(self, cfg: dict) -> dict:
+        """Merge deck_sv sliders into deck_right and remove deck_sv. SV (idx 4) becomes normal slider in L/R."""
+        cfg = copyd.deepcopy(cfg)
+        sv_cfg = cfg.pop('deck_sv', None)
+        if isinstance(sv_cfg, dict):
+            sliders = sv_cfg.get('sliders') or []
+            for idx in sliders:
+                if isinstance(idx, int) and idx == 4:
+                    right = cfg.get('deck_right') or {}
+                    if isinstance(right, dict):
+                        lst = list(right.get('sliders') or [])
+                        if 4 not in lst:
+                            lst.append(4)
+                            cfg['deck_right'] = {**right, 'sliders': lst}
+                    break
+        return cfg
+
+    def _set_events_decks_splitter_locked(self, locked: bool) -> None:
+        """Enable/disable splitter handles (outer and inner deck splitters) so Lock decks layout prevents dragging."""
+        sp = self.eventsBottomHSplitter
+        for i in range(1, sp.count()):
+            h = sp.handle(i)
+            if h is not None:
+                h.setEnabled(not locked)
+                try:
+                    h.setCursor(Qt.CursorShape.ArrowCursor if locked else Qt.CursorShape.SplitHCursor)
+                except Exception:  # pylint: disable=broad-except
+                    pass
+        default_width = getattr(self, '_eventsBottomHSplitterHandleWidthDefault', 6)
+        if not default_width:
+            default_width = 6
+        sp.setHandleWidth(0 if locked else max(6, default_width))
+        for inner_sp in (self.eventsDeckLeftInnerSplitter, self.eventsDeckRightInnerSplitter, self.eventsDeckSVInnerSplitter):
+            inner_sp.setHandleWidth(0 if locked else max(6, default_width))
+            for i in range(1, inner_sp.count()):
+                h = inner_sp.handle(i)
+                if h is not None:
+                    h.setEnabled(not locked)
+        accept_drops = not locked
+        self.eventsDeckLeftPanel.setAcceptDrops(accept_drops)
+        self.eventsDeckRightPanel.setAcceptDrops(accept_drops)
+        self.eventsDeckSVPanel.setAcceptDrops(accept_drops)
+        self.extrabuttondialogs.setAcceptDrops(accept_drops)
+        if hasattr(self, 'editBottomLayoutAction'):
+            self.editBottomLayoutAction.setChecked(not locked)
+
+    @pyqtSlot(bool)
+    def _toggle_edit_bottom_layout(self, _: bool = False) -> None:
+        """Toggle Edit bottom layout: unchecked = Lock (handles hidden), checked = Unlock (handles visible)."""
+        self.eventsDecksLayoutLocked = not self.editBottomLayoutAction.isChecked()
+        self._set_events_decks_splitter_locked(self.eventsDecksLayoutLocked)
+
+    def _deck_slider_dropped(self, deck_id: str, slider_idx: int) -> None:
+        """Update eventsDecksConfig after a slider was dropped on deck_id (deck_left/deck_right/deck_sv) or 'hidden'."""
+        if slider_idx < 0 or slider_idx > 4:
+            return
+        config = getattr(self, 'eventsDecksConfig', {})
+        config = copyd.deepcopy(config)
+        sv_enabled = bool(getattr(self.pidcontrol, 'svSlider', False))
+        for key in ('deck_left', 'deck_right'):
+            cfg = config.get(key) or {}
+            sliders = list(cfg.get('sliders') or [])
+            sliders = [i for i in sliders if i != slider_idx]
+            config[key] = {**cfg, 'sliders': sliders}
+        if deck_id == 'hidden':
+            self.eventsDecksConfig = config
+            self.applyEventSliderLayout()
+            return
+        if deck_id in ('deck_left', 'deck_right'):
+            if slider_idx == 4 and not sv_enabled:
+                self.eventsDecksConfig = config
+                self.applyEventSliderLayout()
+                return
+            cfg = config.get(deck_id) or {}
+            sliders = list(cfg.get('sliders') or [])
+            sliders.append(slider_idx)
+            config[deck_id] = {**cfg, 'sliders': sliders}
+        self.eventsDecksConfig = config
+        self.applyEventSliderLayout()
+
+    def eventFilter(self, watched: QWidget, event: QEvent) -> bool:
+        """Start deck slider drag from LCD when in unlock mode."""
+        deck_lcds = (self.sliderLCD1, self.sliderLCD2, self.sliderLCD3, self.sliderLCD4, self.sliderLCDSV)
+        if watched not in deck_lcds:
+            return super().eventFilter(watched, event)
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            idx = watched.property('deck_slider_idx')
+            if idx is not None and 0 <= int(idx) <= 4:
+                self._deck_slider_lcd_drag_start_pos = event.globalPosition().toPoint()
+            return False
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            self._deck_slider_lcd_drag_start_pos = None
+            return False
+        if event.type() == QEvent.Type.MouseMove and self._deck_slider_lcd_drag_start_pos is not None:
+            idx = watched.property('deck_slider_idx')
+            if idx is None:
+                return False
+            idx = int(idx)
+            if idx < 0 or idx > 4 or getattr(self, 'eventsDecksLayoutLocked', True):
+                self._deck_slider_lcd_drag_start_pos = None
+                return False
+            pos = event.globalPosition().toPoint()
+            if (pos - self._deck_slider_lcd_drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
+                self._deck_slider_lcd_drag_start_pos = None
+                mime = QMimeData()
+                mime.setData(SLIDER_DECK_MIME, QByteArray(str(idx).encode('utf-8')))
+                drag = QDrag(watched)
+                drag.setMimeData(mime)
+                drag.exec(Qt.DropAction.MoveAction)
+                return True
+        return super().eventFilter(watched, event)
+
+    def _clear_splitter(self, splitter: QSplitter) -> None:
+        """Remove all widgets from splitter; widgets get reparented to stash (never top-level)."""
+        while splitter.count():
+            w = splitter.widget(0)
+            if w is not None:
+                self._stash_widget(w)
+
+    def _clear_layout(self, layout: QLayout) -> None:
+        """Remove all items from layout; widgets go to stash so they never become top-level."""
+        while layout.count():
+            item = layout.takeAt(0)
+            if item is not None:
+                w = item.widget()
+                if w is not None:
+                    w.hide()
+                    self._stash_widget(w)
+
+    def _restore_events_bottom_splitter_standard(self) -> None:
+        """Restore splitter to standard two panels: left container + buttons."""
+        self._clear_splitter(self.eventsBottomHSplitter)
+        self.eventsBottomHSplitter.addWidget(self.eventsBottomLeftContainer)
+        self.eventsBottomHSplitter.addWidget(self.extrabuttondialogs)
+        state = getattr(self, '_eventsBottomHSplitterState', None)
+        if state is not None:
+            try:
+                self.eventsBottomHSplitter.restoreState(state)
+            except Exception:  # pylint: disable=broad-except
+                pass
+        self._ensure_events_bottom_splitter_standard_sane_sizes()
+
+    def _take_sliders_from_legacy(self) -> None:
+        """Remove groupboxes from leftlayout and *x/SV layouts; reparent to stash so they never become top-level."""
+        while self.leftlayout.count():
+            item = self.leftlayout.takeAt(0)
+            if item is not None:
+                w = item.widget()
+                if w is not None:
+                    w.hide()
+                    self._stash_widget(w)
+        grp_x_layouts = (self.sliderGrpBox1x, self.sliderGrpBox2x, self.sliderGrpBox3x, self.sliderGrpBox4x)
+        for ly in grp_x_layouts:
+            while ly.count():
+                item = ly.takeAt(0)
+                if item is not None:
+                    w = item.widget()
+                    if w is not None:
+                        w.hide()
+                        self._stash_widget(w)
+        while self.sliderGrpSV_layout.count():
+            item = self.sliderGrpSV_layout.takeAt(0)
+            if item is not None:
+                w = item.widget()
+                if w is not None:
+                    w.hide()
+                    self._stash_widget(w)
+
+    def _collect_sliders_from_decks(self) -> None:
+        """Take groupboxes from deck panel inner splitters and put them back into legacy *x and SV layouts."""
+        grp_boxes = (self.sliderGrpBox1, self.sliderGrpBox2, self.sliderGrpBox3, self.sliderGrpBox4, self.sliderGrpBoxSV)
+        grp_x_layouts = (self.sliderGrpBox1x, self.sliderGrpBox2x, self.sliderGrpBox3x, self.sliderGrpBox4x)
+        for sp in (self.eventsDeckLeftInnerSplitter, self.eventsDeckRightInnerSplitter, self.eventsDeckSVInnerSplitter):
+            self._clear_splitter(sp)
+        for i in range(4):
+            while grp_x_layouts[i].count():
+                grp_x_layouts[i].takeAt(0)
+            grp_x_layouts[i].addWidget(grp_boxes[i])
+        while self.sliderGrpSV_layout.count():
+            self.sliderGrpSV_layout.takeAt(0)
+        self.sliderGrpSV_layout.addWidget(grp_boxes[4])
+
+    def _applyEventSliderLayoutDecks(self) -> None:
+        """Apply decks layout: DeckL | Buttons | DeckR in eventsBottomHSplitter (no separate SV panel). Only when container == embedded."""
+        container = getattr(self, 'eventsliderContainerMode', 'dock_left')
+        if container != 'embedded':
+            return
+        sv_enabled = bool(getattr(self.pidcontrol, 'svSlider', False))
+        grp_boxes = (self.sliderGrpBox1, self.sliderGrpBox2, self.sliderGrpBox3, self.sliderGrpBox4, self.sliderGrpBoxSV)
+        # Use eventsDecksPanelOrder as-is; only deck_left, buttons, deck_right (no deck_sv panel)
+        raw_order = getattr(self, 'eventsDecksPanelOrder', ['deck_left', 'buttons', 'deck_right'])
+        order = [x for x in raw_order if x in ('deck_left', 'buttons', 'deck_right')]
+        if not order:
+            order = ['deck_left', 'buttons', 'deck_right']
+        config = getattr(self, 'eventsDecksConfig', {})
+        assigned: set[int] = set()
+        for deck_id in ('deck_left', 'deck_right'):
+            deck_cfg = config.get(deck_id) or {}
+            for idx in deck_cfg.get('sliders') or []:
+                if isinstance(idx, int) and 0 <= idx <= 4:
+                    assigned.add(idx)
+        self._take_sliders_from_legacy()
+        deck_left_cfg = config.get('deck_left', {'orientation': 'vertical', 'sliders': [0, 1]})
+        deck_right_cfg = config.get('deck_right', {'orientation': 'horizontal', 'sliders': [2, 3, 4]})
+        sliders_tuple = (self.slider1, self.slider2, self.slider3, self.slider4, self.sliderSV)
+        def _effective_indices(cfg: dict, allow_sv: bool) -> list[int]:
+            raw = cfg.get('sliders') or []
+            return [idx for idx in raw if isinstance(idx, int) and 0 <= idx <= 4 and (idx != 4 or (allow_sv and sv_enabled))]
+
+        left_indices = _effective_indices(deck_left_cfg, True)
+        right_indices = _effective_indices(deck_right_cfg, True)
+        has_left = len(left_indices) > 0
+        has_right = len(right_indices) > 0
+
+        id_to_widget: dict[str, QWidget] = {
+            'deck_left': self.eventsDeckLeftPanel,
+            'deck_right': self.eventsDeckRightPanel,
+            'buttons': self.extrabuttondialogs,
+        }
+        locked = getattr(self, 'eventsDecksLayoutLocked', True)
+        widgets_for_splitter: list[QWidget] = []
+        for pid in order:
+            if pid == 'deck_left' and not has_left and locked:
+                continue
+            if pid == 'deck_right' and not has_right and locked:
+                continue
+            w = id_to_widget.get(pid)
+            if w is not None:
+                widgets_for_splitter.append(w)
+
+        sp = self.eventsBottomHSplitter
+        _is_decks = self._is_events_bottom_splitter_in_decks()
+        current_order = [sp.widget(i) for i in range(sp.count())]
+        order_changed = current_order != widgets_for_splitter
+        need_rebuild = not _is_decks or order_changed
+
+        if need_rebuild:
+            if _is_decks:
+                self._eventsDecksSplitterState = sp.saveState()
+                old_sizes = list(sp.sizes()) if sp.count() > 0 else []
+                widget_to_size = dict(zip(current_order, old_sizes)) if len(current_order) == len(old_sizes) else {}
+            else:
+                widget_to_size = {}
+            self._clear_splitter(sp)
+            for w in widgets_for_splitter:
+                sp.addWidget(w)
+            if _is_decks and widget_to_size:
+                total = sp.size().width() if sp.size().width() > 0 else (sp.parent().size().width() if sp.parent() is not None else 800)
+                if total <= 0:
+                    total = 800
+                n = sp.count()
+                handle_w = max(6, getattr(self, '_eventsBottomHSplitterHandleWidthDefault', 6) or 6)
+                default = max(80, (total - (n - 1) * handle_w) // n) if n else 200
+                new_sizes = [widget_to_size.get(w, default) for w in widgets_for_splitter]
+                if sum(new_sizes) > 0:
+                    sp.setSizes(new_sizes)
+            elif not _is_decks:
+                restored = False
+                state = getattr(self, '_eventsDecksSplitterState', None)
+                if state is not None:
+                    try:
+                        restored = sp.restoreState(state)
+                    except Exception:  # pylint: disable=broad-except
+                        restored = False
+                if not restored:
+                    total = sp.size().width() if sp.size().width() > 0 else (sp.parent().size().width() if sp.parent() is not None else 800)
+                    if total <= 0:
+                        total = 800
+                    n = sp.count()
+                    handle_w = max(6, getattr(self, '_eventsBottomHSplitterHandleWidthDefault', 6) or 6)
+                    available = max(0, total - (n - 1) * handle_w)
+                    ratios = []
+                    for idx in range(n):
+                        w = sp.widget(idx)
+                        if w is self.eventsDeckLeftPanel or w is self.eventsDeckRightPanel:
+                            ratios.append(1)
+                        elif w is self.extrabuttondialogs:
+                            ratios.append(2)
+                        else:
+                            ratios.append(1)
+                    total_ratio = sum(ratios)
+                    mins = [180 if sp.widget(i) is self.extrabuttondialogs else 80 for i in range(n)]
+                    sizes = [max(mins[i], int(available * ratios[i] / total_ratio)) for i in range(n)]
+                    if sum(sizes) > 0:
+                        sp.setSizes(sizes)
+            self._ensure_events_decks_splitter_sane_sizes()
+        elif _is_decks:
+            self._eventsDecksSplitterState = sp.saveState()
+
+        # Clear inner splitters and fill from config; orientation sets layout (no inner restoreState)
+        min_width_horizontal = 160
+        deck_inner_splitters = (
+            ('deck_left', self.eventsDeckLeftPanel, self.eventsDeckLeftInnerSplitter, deck_left_cfg),
+            ('deck_right', self.eventsDeckRightPanel, self.eventsDeckRightInnerSplitter, deck_right_cfg),
+        )
+        self.eventsDeckSVPanel.setVisible(False)
+        for deck_id, panel, inner_sp, cfg in deck_inner_splitters:
+            self._clear_splitter(inner_sp)
+            orient_key = cfg.get('orientation', 'vertical')
+            indices = _effective_indices(cfg, True)
+            if not indices:
+                if locked:
+                    panel.setVisible(False)
+                continue
+            is_vertical = orient_key == 'vertical'
+            inner_sp.setOrientation(Qt.Orientation.Vertical if is_vertical else Qt.Orientation.Horizontal)
+            for idx in indices:
+                if 0 <= idx < len(sliders_tuple):
+                    sliders_tuple[idx].setOrientation(Qt.Orientation.Vertical if is_vertical else Qt.Orientation.Horizontal)
+            for idx in indices:
+                if 0 <= idx < len(grp_boxes):
+                    grp = grp_boxes[idx]
+                    inner_sp.addWidget(grp)
+                    grp.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+                    h = grp.sizeHint().height()
+                    if h > 0:
+                        grp.setMaximumHeight(h)
+                    if is_vertical:
+                        grp.setMinimumWidth(55)
+                        grp.setMaximumWidth(55)
+                    else:
+                        grp.setMinimumWidth(min_width_horizontal)
+                        grp.setMaximumWidth(16777215)
+            for i in range(inner_sp.count()):
+                inner_sp.setStretchFactor(i, 0)
+            sizes = []
+            for i in range(inner_sp.count()):
+                w = inner_sp.widget(i)
+                if w is not None:
+                    if is_vertical:
+                        sizes.append(max(1, w.sizeHint().height()))
+                    else:
+                        sizes.append(max(min_width_horizontal, w.sizeHint().width()))
+                else:
+                    sizes.append(80)
+            if sizes:
+                inner_sp.setSizes(sizes)
+            inner_sp.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        for panel, has_any in (
+            (self.eventsDeckLeftPanel, has_left),
+            (self.eventsDeckRightPanel, has_right),
+        ):
+            if has_any:
+                panel.setVisible(True)
+                panel.setMinimumWidth(80)
+                panel.setMaximumWidth(16777215)
+            elif not locked:
+                panel.setVisible(True)
+                panel.setMinimumWidth(80)
+                panel.setMaximumWidth(16777215)
+            else:
+                panel.setVisible(False)
+        for i, w in enumerate(grp_boxes):
+            if i not in assigned:
+                w.hide()
+                self._stash_widget(w)
+        for i in range(sp.count()):
+            sp.setCollapsible(i, False)
+        # Apply reasonable stretch factors based on identity rather than fixed indices
+        try:
+            for idx in range(sp.count()):
+                w = sp.widget(idx)
+                if w is self.eventsDeckLeftPanel:
+                    sp.setStretchFactor(idx, 1)
+                elif w is self.extrabuttondialogs:
+                    sp.setStretchFactor(idx, 2)
+                elif w is self.eventsDeckRightPanel:
+                    sp.setStretchFactor(idx, 1)
+        except Exception:  # pylint: disable=broad-except
+            pass
+        self._set_events_decks_splitter_locked(getattr(self, 'eventsDecksLayoutLocked', False))
+        self.updateSlidersVisibility()
+
     def _clearSliderFrameLayout(self) -> None:
         """Remove all items from leftlayout without deleting child widgets/layouts."""
         while self.leftlayout.count():
             self.leftlayout.takeAt(0)
 
     def applyEventSliderLayout(self) -> None:
-        """Apply slider layout: vertical (legacy two columns + SV) or horizontal (one row). Sets sizes and structure."""
+        """Apply slider layout: vertical (legacy two columns + SV), horizontal (one row), or decks (DeckL|Buttons|DeckR|SV)."""
         layout_mode = getattr(self, 'eventsliderLayoutMode', 'auto')
         container = getattr(self, 'eventsliderContainerMode', 'dock_left')
-        if layout_mode == 'auto':
+        sp = self.eventsBottomHSplitter
+        if layout_mode == 'decks':
+            if container == 'embedded':
+                if not self._is_events_bottom_splitter_in_decks() and sp.count() == 2:
+                    self._eventsBottomHSplitterState = sp.saveState()
+                self._applyEventSliderLayoutDecks()
+                return
+            if self._is_events_bottom_splitter_in_decks():
+                self._eventsDecksSplitterState = sp.saveState()
+                self._collect_sliders_from_decks()
+                self._restore_events_bottom_splitter_standard()
+            effective = 'horizontal'
+        elif layout_mode == 'auto':
             effective = 'vertical' if container == 'dock_left' else 'horizontal'
         else:
             effective = layout_mode  # 'vertical' or 'horizontal'
+
+        if self._is_events_bottom_splitter_in_decks():
+            self._eventsDecksSplitterState = sp.saveState()
+            self._collect_sliders_from_decks()
+            self._restore_events_bottom_splitter_standard()
 
         alt = getattr(self, 'eventsliderAlternativeLayout', False)
         order: list[int] = [1, 4, 2, 3] if alt else [1, 2, 3, 4]
@@ -12018,6 +12629,14 @@ class ApplicationWindow(QMainWindow):
         mode = getattr(self, 'eventsliderContainerMode', 'dock_left')
         if mode.startswith('dock_'):
             return self.sliderDock.isVisible()
+        if getattr(self, 'eventsliderLayoutMode', 'auto') == 'decks':
+            sp = self.eventsBottomHSplitter
+            deck_panels = (self.eventsDeckLeftPanel, self.eventsDeckRightPanel, self.eventsDeckSVPanel)
+            for i in range(sp.count()):
+                w = sp.widget(i)
+                if w in deck_panels and w.isVisible():
+                    return True
+            return any(sp.widget(i) in deck_panels for i in range(sp.count()))
         return self.sliderFrame.isVisible()
 
     @pyqtSlot()
@@ -12086,29 +12705,49 @@ class ApplicationWindow(QMainWindow):
             self.showLCDs()
 
     def updateSVsliderVisibility(self) -> None:
+        if getattr(self, 'eventsliderLayoutMode', 'auto') == 'decks' and getattr(self, 'eventsliderContainerMode', 'dock_left') == 'embedded':
+            if 4 not in self._decks_assigned_indices():
+                self.sliderGrpBoxSV.hide()
+                self._stash_widget(self.sliderGrpBoxSV)
+                return
         self.sliderGrpBoxSV.setVisible(self.pidcontrol.svSlider)
 
     def updateSlidersProperties(self) -> None:
         # update slider properties and event type names
-        if bool(self.eventslidervisibilities[0]):
+        decks_embedded = (getattr(self, 'eventsliderLayoutMode', 'auto') == 'decks'
+                          and getattr(self, 'eventsliderContainerMode', 'dock_left') == 'embedded')
+        assigned: set[int] = self._decks_assigned_indices() if decks_embedded else set(range(4))
+        if 0 not in assigned:
+            self.sliderGrpBox1.hide()
+            self._stash_widget(self.sliderGrpBox1)
+        elif bool(self.eventslidervisibilities[0]):
             self.sliderGrpBox1.setVisible(True)
             self.sliderGrpBox1.setTitle(self.qmc.etypesf(0))
         else:
             self.sliderGrpBox1.setVisible(False)
             self.sliderGrpBox1.setTitle('')
-        if bool(self.eventslidervisibilities[1]):
+        if 1 not in assigned:
+            self.sliderGrpBox2.hide()
+            self._stash_widget(self.sliderGrpBox2)
+        elif bool(self.eventslidervisibilities[1]):
             self.sliderGrpBox2.setVisible(True)
             self.sliderGrpBox2.setTitle(self.qmc.etypesf(1))
         else:
             self.sliderGrpBox2.setVisible(False)
             self.sliderGrpBox2.setTitle('')
-        if bool(self.eventslidervisibilities[2]):
+        if 2 not in assigned:
+            self.sliderGrpBox3.hide()
+            self._stash_widget(self.sliderGrpBox3)
+        elif bool(self.eventslidervisibilities[2]):
             self.sliderGrpBox3.setVisible(True)
             self.sliderGrpBox3.setTitle(self.qmc.etypesf(2))
         else:
             self.sliderGrpBox3.setVisible(False)
             self.sliderGrpBox3.setTitle('')
-        if bool(self.eventslidervisibilities[3]):
+        if 3 not in assigned:
+            self.sliderGrpBox4.hide()
+            self._stash_widget(self.sliderGrpBox4)
+        elif bool(self.eventslidervisibilities[3]):
             self.sliderGrpBox4.setVisible(True)
             self.sliderGrpBox4.setTitle(self.qmc.etypesf(3))
         else:
@@ -19414,27 +20053,56 @@ class ApplicationWindow(QMainWindow):
             self.qmc.mode_tempsliders = ('F' if str(settings.value('ModeTempSliders',self.qmc.mode_tempsliders)) == 'F' else 'C')
             if settings.contains('eventsliderContainerMode'):
                 self.eventsliderContainerMode = str(settings.value('eventsliderContainerMode', 'dock_left'))
-                if self.eventsliderContainerMode not in ('dock_left', 'dock_bottom', 'embedded'):
+                if self.eventsliderContainerMode not in ('dock_left', 'dock_right', 'dock_bottom', 'embedded'):
                     self.eventsliderContainerMode = 'dock_left'
-                self.eventsliderDockPosition = 'bottom' if self.eventsliderContainerMode == 'dock_bottom' else 'left'
+                self.eventsliderDockPosition = 'right' if self.eventsliderContainerMode == 'dock_right' else ('bottom' if self.eventsliderContainerMode == 'dock_bottom' else 'left')
                 self._apply_slider_container_after_restore = True
             elif settings.contains('eventsliderDockPosition'):
                 self.eventsliderDockPosition = str(settings.value('eventsliderDockPosition', 'left'))
-                if self.eventsliderDockPosition not in ('left', 'bottom'):
+                if self.eventsliderDockPosition not in ('left', 'right', 'bottom'):
                     self.eventsliderDockPosition = 'left'
-                self.eventsliderContainerMode = 'dock_bottom' if self.eventsliderDockPosition == 'bottom' else 'dock_left'
+                self.eventsliderContainerMode = 'dock_right' if self.eventsliderDockPosition == 'right' else ('dock_bottom' if self.eventsliderDockPosition == 'bottom' else 'dock_left')
                 self._apply_slider_container_after_restore = True
             else:
                 self._apply_slider_container_after_restore = False
             if settings.contains('eventsliderLayoutMode'):
                 lm = str(settings.value('eventsliderLayoutMode', 'auto'))
-                if lm in ('auto', 'vertical', 'horizontal'):
+                if lm in ('auto', 'vertical', 'horizontal', 'decks'):
                     self.eventsliderLayoutMode = lm
                 else:
                     self.eventsliderLayoutMode = 'auto'
             else:
                 self.eventsliderLayoutMode = 'auto'
+            _decks_order_default = ['deck_left', 'buttons', 'deck_right']
+            if settings.contains('eventsDecksPanelOrder'):
+                try:
+                    val = settings.value('eventsDecksPanelOrder', '[]')
+                    raw_order = json.loads(val) if isinstance(val, str) else list(val)
+                    if isinstance(raw_order, list) and raw_order:
+                        self.eventsDecksPanelOrder = [x for x in raw_order if x in ('deck_left', 'buttons', 'deck_right')]
+                        if not self.eventsDecksPanelOrder:
+                            self.eventsDecksPanelOrder = _decks_order_default[:]
+                    else:
+                        self.eventsDecksPanelOrder = _decks_order_default[:]
+                except (TypeError, ValueError):
+                    self.eventsDecksPanelOrder = _decks_order_default[:]
+            if settings.contains('eventsDecksConfig'):
+                try:
+                    val = settings.value('eventsDecksConfig', '{}')
+                    if isinstance(val, str):
+                        cfg = json.loads(val)
+                    else:
+                        cfg = val
+                    if isinstance(cfg, dict) and cfg:
+                        self.eventsDecksConfig = self._migrate_decks_config_drop_sv(cfg)
+                except Exception:  # pylint: disable=broad-except
+                    # Keep default decks config on any malformed value
+                    pass
+            if settings.contains('eventsDecksLayoutLocked'):
+                self.eventsDecksLayoutLocked = toBool(settings.value('eventsDecksLayoutLocked', False))
+            self._eventsDecksSplitterState = settings.value('eventsDecksSplitterState')  # QByteArray or None
             self._eventsBottomHSplitterState = settings.value('eventsBottomHSplitterState')  # QByteArray or None
+            # Inner deck splitter states no longer saved/restored (avoid orientation/size conflicts)
             settings.endGroup()
             self.qmc.adjustTempSliders() # adjust min/max slider limits of temperature sliders to correspond to the current temp mode
 #--- END GROUP Sliders
@@ -19638,7 +20306,7 @@ class ApplicationWindow(QMainWindow):
             if settings.contains('extraeventsactions'):
                 self.buttonlistmaxlen = toInt(settings.value('buttonlistmaxlen',self.buttonlistmaxlen))
                 if settings.contains('extraeventbuttonsCompactLayout'):
-                    self.extraeventbuttonsCompactLayout = toBool(settings.value('extraeventbuttonsCompactLayout',self.extraeventbuttonsCompactLayout))
+                    self.extraeventbuttonsCompactLayout = toBool(settings.value('extraeventbuttonsCompactLayout', False))
                 self.extraeventsbuttonsflags = [toInt(x) for x in toList(settings.value('extraeventsbuttonsflags',self.extraeventsbuttonsflags))]
                 extraeventstypes = [toInt(x) for x in toList(settings.value('extraeventstypes',self.extraeventstypes))]
                 extraeventsvalues = [toFloat(x) for x in toList(settings.value('extraeventsvalues',self.extraeventsvalues))]
@@ -19763,7 +20431,6 @@ class ApplicationWindow(QMainWindow):
                 self.summarystatsfontsize = toInt(settings.value('summarystatsfontsize', int(self.summarystatsfontsize)))
             if settings.contains('HoverBubbleConfig'):
                 try:
-                    import json
                     from artisanlib.statistics import migrate_hover_bubble_config
                     raw = settings.value('HoverBubbleConfig', None)
                     if raw and isinstance(raw, str):
@@ -19849,11 +20516,25 @@ class ApplicationWindow(QMainWindow):
                 # Apply slider container mode after restoreState when user had saved position/container (migrate legacy key)
                 if getattr(self, '_apply_slider_container_after_restore', False):
                     self.applyEventSliderContainerMode()
-                    if getattr(self, 'eventsliderContainerMode', 'dock_left') == 'embedded' and getattr(self, '_eventsBottomHSplitterState', None):
-                        try:
-                            self.eventsBottomHSplitter.restoreState(self._eventsBottomHSplitterState)
-                        except Exception as e: # pylint: disable=broad-except
-                            _log.exception(e)
+                    if getattr(self, 'eventsliderContainerMode', 'dock_left') == 'embedded':
+                        sp = self.eventsBottomHSplitter
+                        cnt = sp.count()
+                        is_decks = getattr(self, 'eventsliderLayoutMode', 'auto') == 'decks'
+                        if is_decks and getattr(self, '_eventsDecksSplitterState', None) is not None and cnt >= 2:
+                            try:
+                                sp.restoreState(self._eventsDecksSplitterState)
+                                self._ensure_events_decks_splitter_sane_sizes()
+                                self._set_events_decks_splitter_locked(getattr(self, 'eventsDecksLayoutLocked', False))
+                            except Exception as e:  # pylint: disable=broad-except
+                                _log.exception(e)
+                                self._eventsDecksSplitterState = None
+                        elif not is_decks and getattr(self, '_eventsBottomHSplitterState', None) is not None and cnt == 2:
+                            try:
+                                sp.restoreState(self._eventsBottomHSplitterState)
+                                self._ensure_events_bottom_splitter_standard_sane_sizes()
+                            except Exception as e:  # pylint: disable=broad-except
+                                _log.exception(e)
+                                self._eventsBottomHSplitterState = None
             if not filename: # only if an external settings file is loaded
                 FigureCanvas.updateGeometry(self.qmc.canvas)  #@UndefinedVariable
 
@@ -21357,7 +22038,7 @@ class ApplicationWindow(QMainWindow):
             #custom event buttons
             settings.beginGroup('ExtraEventButtons')
             self.settingsSetValue(settings, default_settings, 'buttonlistmaxlen',self.buttonlistmaxlen, read_defaults)
-            self.settingsSetValue(settings, default_settings, 'extraeventbuttonsCompactLayout',self.extraeventbuttonsCompactLayout, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'extraeventbuttonsCompactLayout', getattr(self, 'extraeventbuttonsCompactLayout', False), read_defaults)
             self.settingsSetValue(settings, default_settings, 'extraeventstypes',self.extraeventstypes, read_defaults)
             self.settingsSetValue(settings, default_settings, 'extraeventsvalues',self.extraeventsvalues, read_defaults)
             self.settingsSetValue(settings, default_settings, 'extraeventsactionstrings',self.extraeventsactionstrings, read_defaults)
@@ -21410,9 +22091,51 @@ class ApplicationWindow(QMainWindow):
             self.settingsSetValue(settings, default_settings, 'eventsliderAlternativeLayout',self.eventsliderAlternativeLayout, read_defaults)
             self.settingsSetValue(settings, default_settings, 'eventsliderContainerMode',self.eventsliderContainerMode, read_defaults)
             self.settingsSetValue(settings, default_settings, 'eventsliderLayoutMode',getattr(self, 'eventsliderLayoutMode', 'auto'), read_defaults)
-            self.settingsSetValue(settings, default_settings, 'eventsliderDockPosition','bottom' if self.eventsliderContainerMode == 'dock_bottom' else 'left', read_defaults)
+            self.settingsSetValue(settings, default_settings, 'eventsliderDockPosition',
+                'right' if self.eventsliderContainerMode == 'dock_right' else ('bottom' if self.eventsliderContainerMode == 'dock_bottom' else 'left'), read_defaults)
+            from json import dumps as _json_dumps
+            default_order = ['deck_left', 'buttons', 'deck_right']
+            default_config: dict = {}
+            order = list(getattr(self, 'eventsDecksPanelOrder', default_order))
+            order = [x for x in order if x in ('deck_left', 'buttons', 'deck_right')] or default_order[:]
+            try:
+                order_json = _json_dumps(order)
+            except Exception:  # pylint: disable=broad-except
+                order_json = _json_dumps(default_order)
+            cfg = getattr(self, 'eventsDecksConfig', default_config)
+            if not isinstance(cfg, dict):
+                cfg = {}
+            cfg_sanitized: dict = {}
+            for key in ('deck_left', 'deck_right'):
+                if key not in cfg:
+                    continue
+                entry = cfg[key] if isinstance(cfg.get(key), dict) else {}
+                orient = entry.get('orientation') if isinstance(entry.get('orientation'), str) else 'vertical'
+                cfg_sanitized[key] = {'orientation': orient if orient in ('vertical', 'horizontal') else 'vertical'}
+                sliders_raw = entry.get('sliders') if isinstance(entry.get('sliders'), (list, tuple)) else []
+                sliders_ok = [int(x) for x in sliders_raw if isinstance(x, (int, float)) and 0 <= int(x) <= 4]
+                cfg_sanitized[key]['sliders'] = sliders_ok
+            try:
+                cfg_json = _json_dumps(cfg_sanitized)
+            except Exception:  # pylint: disable=broad-except
+                cfg_json = _json_dumps(default_config)
+            self.settingsSetValue(settings, default_settings, 'eventsDecksPanelOrder', order_json, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'eventsDecksConfig', cfg_json, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'eventsDecksLayoutLocked', getattr(self, 'eventsDecksLayoutLocked', False), read_defaults)
             if getattr(self, 'eventsliderContainerMode', 'dock_left') == 'embedded':
-                self.settingsSetValue(settings, default_settings, 'eventsBottomHSplitterState',self.eventsBottomHSplitter.saveState(), read_defaults)
+                sp = self.eventsBottomHSplitter
+                cnt = sp.count()
+                is_decks = getattr(self, 'eventsliderLayoutMode', 'auto') == 'decks'
+                if is_decks and cnt >= 2:
+                    try:
+                        self.settingsSetValue(settings, default_settings, 'eventsDecksSplitterState', sp.saveState(), read_defaults)
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                elif not is_decks and cnt == 2:
+                    try:
+                        self.settingsSetValue(settings, default_settings, 'eventsBottomHSplitterState', sp.saveState(), read_defaults)
+                    except Exception:  # pylint: disable=broad-except
+                        pass
             self.settingsSetValue(settings, default_settings, 'slideractions',self.eventslideractions, read_defaults)
             self.settingsSetValue(settings, default_settings, 'slidercommands',self.eventslidercommands, read_defaults)
             self.settingsSetValue(settings, default_settings, 'slideroffsets',self.eventslideroffsets, read_defaults)
@@ -21469,7 +22192,6 @@ class ApplicationWindow(QMainWindow):
             self.settingsSetValue(settings, default_settings, 'summarystatstypes',self.summarystatstypes, read_defaults)
             self.settingsSetValue(settings, default_settings, 'summarystatsfontsize',self.summarystatsfontsize, read_defaults)
             try:
-                import json
                 hover_cfg = getattr(self.qmc, 'hover_bubble_config', None)
                 if hover_cfg and isinstance(hover_cfg, list):
                     self.settingsSetValue(settings, default_settings, 'HoverBubbleConfig', json.dumps(hover_cfg), read_defaults)
@@ -21514,7 +22236,8 @@ class ApplicationWindow(QMainWindow):
         except Exception as e: # pylint: disable=broad-except
             _log.exception(e)
             _, _, exc_tb = sys.exc_info()
-            QMessageBox.information(self, QApplication.translate('Error Message', 'Error',None),QApplication.translate('Error Message', 'Exception:') + ' saveAllSettings()  @line ' + str(getattr(exc_tb, 'tb_lineno', '?')))
+            msg = f"{type(e).__name__}: {e!r} @line {getattr(exc_tb, 'tb_lineno', '?')}"
+            QMessageBox.information(self, QApplication.translate('Error Message', 'Error', None), msg)
         return False
 
     def closeEventSettings_theme(self, filename:str|None = None) -> None:
@@ -24838,8 +25561,6 @@ class ApplicationWindow(QMainWindow):
     def checkUpdate(self, _:bool = False) -> None:
         update_url = '<a href="https://artisan-scope.org">https://artisan-scope.org</a>'
         update_str = QApplication.translate('About', 'There was a problem retrieving the latest version information.  Please check your Internet connection, try again later, or check manually.')
-        import json
-        import json.decoder
         try:
             import requests
             r = requests.get('https://api.github.com/repos/artisan-roaster-scope/artisan/releases/latest', timeout=(2,4))
@@ -24861,7 +25582,7 @@ class ApplicationWindow(QMainWindow):
                         elif latest < __version__:
                             update_str = QApplication.translate('About', 'You are using a beta continuous build.')
                             update_str += '<br/><br/>' + QApplication.translate('About', 'You will see a notice here once a new official release is available.')
-        except json.decoder.JSONDecodeError as e:
+        except json.JSONDecodeError as e:
             if not e.doc:
                 _log.error('Empty response in checkUpdate.')
             else:
@@ -26923,7 +27644,7 @@ class ApplicationWindow(QMainWindow):
             if norm in spacer_tokens:
                 return True
             if len(norm) <= 2 and norm:
-                return all((c in string.punctuation) or (c in ' \t\-–—') for c in norm)
+                return all((c in string.punctuation) or (c in ' \t-–—') for c in norm)
             return False
 
         converted_spacers: list[int] = []
@@ -27040,17 +27761,6 @@ class ApplicationWindow(QMainWindow):
         self.e9buttondialog.setVisible(False)
         self.e10buttondialog.setVisible(False)
 
-        row1count = 0
-        row2count = 0
-        row3count = 0
-        row4count = 0
-        row5count = 0
-        row6count = 0
-        row7count = 0
-        row8count = 0
-        row9count = 0
-        row10count = 0
-
         row_layouts = [
             self.e1buttonbarLayout, self.e2buttonbarLayout, self.e3buttonbarLayout, self.e4buttonbarLayout,
             self.e5buttonbarLayout, self.e6buttonbarLayout, self.e7buttonbarLayout, self.e8buttonbarLayout,
@@ -27063,110 +27773,73 @@ class ApplicationWindow(QMainWindow):
         ]
         visible_count = 0
         compact = getattr(self, 'extraeventbuttonsCompactLayout', False)
-        # compact layout: track row/col for role-based layout (row_break, spacer, button)
+        roles_for_align = getattr(self, 'extraeventslayoutroles', [])
+        has_row_break = any((roles_for_align[i] if i < len(roles_for_align) else 0) == 2 for i in range(n))
+        effective_maxlen = self.buttonlistmaxlen
         layout_row = 0
         layout_col = 0
-
-        # hidden buttons at the top of the table are for actions and don't count in the first row
-        # find the index of the first visible button
         first_visible_idx = 0
         for i, _ in enumerate(self.extraeventstypes):
             if self.extraeventsvisibility[i]:
                 first_visible_idx = i
                 break
+        row1count = row2count = row3count = row4count = row5count = 0
+        row6count = row7count = row8count = row9count = row10count = 0
 
         for i, eet in enumerate(self.extraeventstypes):
             role = self.extraeventslayoutroles[i] if i < len(self.extraeventslayoutroles) else 0
             if compact:
-                # round corners based on layout position (for buttons only)
                 if role == 0 and self.extraeventsvisibility[i] and i >= first_visible_idx:
                     pos_in_row = layout_col
                     is_first = (pos_in_row == 0)
-                    is_last = (pos_in_row == self.buttonlistmaxlen - 1)
-                    if is_first and is_last:
-                        self.extraeventbuttonround.append(3)
-                    elif is_first:
-                        self.extraeventbuttonround.append(1)
-                    elif is_last:
-                        self.extraeventbuttonround.append(2)
-                    else:
-                        self.extraeventbuttonround.append(0)
+                    is_last = (pos_in_row == effective_maxlen - 1)
+                    self.extraeventbuttonround.append(3 if (is_first and is_last) else (1 if is_first else (2 if is_last else 0)))
                 else:
                     self.extraeventbuttonround.append(0)
             else:
-                # next button in this group is hidden
-                next_hidden = ((i - first_visible_idx)%self.buttonlistmaxlen < self.buttonlistmaxlen -1 and  # at least one more places in the group
-                        i+1 < len(self.extraeventstypes) and # there is one more button
-                        not self.extraeventsvisibility[i+1]) # and the next one is hidden
-                # previous button in this group is hidden
-                prev_hidden = ((i - first_visible_idx)%self.buttonlistmaxlen > 0 and # at least one previous place in this group
-                        i > 0 and # there is more than one button in total
-                        not self.extraeventsvisibility[i-1]) # and the previous one is hidden
-
-                if (i - first_visible_idx)%self.buttonlistmaxlen == 0: # left-most button in the row
-                    if i == len(self.extraeventstypes)-1 or next_hidden:
-                        # a singleton button in a one element bar
-                        self.extraeventbuttonround.append(3)
-                    else:
-                        # the left-most button in this bar
-                        self.extraeventbuttonround.append(1)
-                elif ((i - first_visible_idx)%self.buttonlistmaxlen < self.buttonlistmaxlen-1) and i != len(self.extraeventstypes)-1:
-                    # a button in the middle of this bar
-                    if prev_hidden and next_hidden:
-                        # we round both sides
-                        self.extraeventbuttonround.append(3)
-                    elif prev_hidden:
-                        # we start a new rounded-group
-                        self.extraeventbuttonround.append(1)
-                    elif next_hidden:
-                        self.extraeventbuttonround.append(2)
-                    else:
-                        # squared button
-                        self.extraeventbuttonround.append(0)
-                # the right-most button in this bar
-                elif prev_hidden:
-                    self.extraeventbuttonround.append(3)
+                next_hidden = ((i - first_visible_idx) % self.buttonlistmaxlen < self.buttonlistmaxlen - 1 and i + 1 < len(self.extraeventstypes) and not self.extraeventsvisibility[i + 1])
+                prev_hidden = ((i - first_visible_idx) % self.buttonlistmaxlen > 0 and i > 0 and not self.extraeventsvisibility[i - 1])
+                if (i - first_visible_idx) % self.buttonlistmaxlen == 0:
+                    self.extraeventbuttonround.append(3 if (i == len(self.extraeventstypes) - 1 or next_hidden) else 1)
+                elif ((i - first_visible_idx) % self.buttonlistmaxlen < self.buttonlistmaxlen - 1) and i != len(self.extraeventstypes) - 1:
+                    self.extraeventbuttonround.append(3 if (prev_hidden and next_hidden) else (1 if prev_hidden else (2 if next_hidden else 0)))
                 else:
-                    self.extraeventbuttonround.append(2)
+                    self.extraeventbuttonround.append(3 if prev_hidden else 2)
 
             p = QPushButton()
             p.setAutoDefault(False)
             p.setStyleSheet(self.extraEventButtonStyle(i))
-            p.setMinimumHeight([self.standard_button_tiny_height,self.standard_button_small_height,self.standard_button_height][self.buttonsize])
-
+            p.setMinimumHeight([self.standard_button_tiny_height, self.standard_button_small_height, self.standard_button_height][self.buttonsize])
             p.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-
             p.setText(self.substButtonLabel(i, self.extraeventslabels[i], eet, self.extraeventsvalues[i]))
             p.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             p.clicked.connect(self.recordextraevent_slot)
+            if compact and role != 0:
+                p.setParent(self.extrabuttondialogs)
+                p.setVisible(False)
             self.buttonlist.append(p)
             self.buttonStates.append(0)
-            #add button to row
+
             if compact:
-                if role == 2:  # row_break: next row, no widget
+                if role == 2:
                     layout_row += 1
                     layout_col = 0
-                elif role == 1:  # spacer
-                    if layout_row < 10:
+                elif role == 1:
+                    if self.extraeventsvisibility[i] and layout_row < 10:
                         w_px = int(self.extraeventsvalues[i]) if self.extraeventsvalues[i] > 0 else 20
                         row_layouts[layout_row].addSpacing(w_px)
                     layout_col += 1
-                    if layout_col >= self.buttonlistmaxlen:
+                    if not has_row_break and layout_col >= effective_maxlen:
                         layout_row += 1
                         layout_col = 0
-                    if layout_row >= 10:
-                        _log.warning('realignbuttons: compact layout row >= 10, skipping further items')
-                elif role == 0:  # button
-                    if self.extraeventsvisibility[i] and i >= first_visible_idx:
-                        if layout_row < 10:
-                            row_layouts[layout_row].addWidget(self.buttonlist[i])
-                        else:
-                            _log.warning('realignbuttons: compact layout row >= 10, skipping button %s', i)
-                        visible_count += 1
-                        layout_col += 1
-                        if layout_col >= self.buttonlistmaxlen:
-                            layout_row += 1
-                            layout_col = 0
+                elif role == 0 and self.extraeventsvisibility[i] and i >= first_visible_idx:
+                    if layout_row < 10:
+                        row_layouts[layout_row].addWidget(self.buttonlist[i])
+                    visible_count += 1
+                    layout_col += 1
+                    if not has_row_break and layout_col >= effective_maxlen:
+                        layout_row += 1
+                        layout_col = 0
             else:
                 if i < first_visible_idx:
                     pass
@@ -27220,56 +27893,56 @@ class ApplicationWindow(QMainWindow):
                     if not self.extraeventsvisibility[i]:
                         self.e10buttonbarLayout.addSpacing(5)
                     row10count += 1
-                    if row10count == self.buttonlistmaxlen:
-                        break
 
+        decks_embedded = (getattr(self, 'eventsliderContainerMode', 'dock_left') == 'embedded'
+                          and getattr(self, 'eventsliderLayoutMode', 'auto') == 'decks')
         if compact:
             for r, layout in enumerate(row_layouts):
                 if layout.count() > 0:
                     row_dialogs[r].setVisible(True)
-                    layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                    layout.setAlignment(Qt.AlignmentFlag.AlignHCenter if decks_embedded else Qt.AlignmentFlag.AlignLeft)
                     layout.addStretch(1)
         else:
             if self.e1buttonbarLayout.count() > 0:
                 self.e1buttondialog.setVisible(True)
                 self.e1buttonbarLayout.insertStretch(0)
-                self.e1buttonbarLayout.insertStretch(self.e1buttonbarLayout.count())
+                self.e1buttonbarLayout.addStretch(1)
             if self.e2buttonbarLayout.count() > 0:
                 self.e2buttondialog.setVisible(True)
                 self.e2buttonbarLayout.insertStretch(0)
-                self.e2buttonbarLayout.insertStretch(self.e2buttonbarLayout.count())
+                self.e2buttonbarLayout.addStretch(1)
             if self.e3buttonbarLayout.count() > 0:
                 self.e3buttondialog.setVisible(True)
                 self.e3buttonbarLayout.insertStretch(0)
-                self.e3buttonbarLayout.insertStretch(self.e3buttonbarLayout.count())
+                self.e3buttonbarLayout.addStretch(1)
             if self.e4buttonbarLayout.count() > 0:
                 self.e4buttondialog.setVisible(True)
                 self.e4buttonbarLayout.insertStretch(0)
-                self.e4buttonbarLayout.insertStretch(self.e4buttonbarLayout.count())
+                self.e4buttonbarLayout.addStretch(1)
             if self.e5buttonbarLayout.count() > 0:
                 self.e5buttondialog.setVisible(True)
                 self.e5buttonbarLayout.insertStretch(0)
-                self.e5buttonbarLayout.insertStretch(self.e5buttonbarLayout.count())
+                self.e5buttonbarLayout.addStretch(1)
             if self.e6buttonbarLayout.count() > 0:
                 self.e6buttondialog.setVisible(True)
                 self.e6buttonbarLayout.insertStretch(0)
-                self.e6buttonbarLayout.insertStretch(self.e6buttonbarLayout.count())
+                self.e6buttonbarLayout.addStretch(1)
             if self.e7buttonbarLayout.count() > 0:
                 self.e7buttondialog.setVisible(True)
                 self.e7buttonbarLayout.insertStretch(0)
-                self.e7buttonbarLayout.insertStretch(self.e7buttonbarLayout.count())
+                self.e7buttonbarLayout.addStretch(1)
             if self.e8buttonbarLayout.count() > 0:
                 self.e8buttondialog.setVisible(True)
                 self.e8buttonbarLayout.insertStretch(0)
-                self.e8buttonbarLayout.insertStretch(self.e8buttonbarLayout.count())
+                self.e8buttonbarLayout.addStretch(1)
             if self.e9buttonbarLayout.count() > 0:
                 self.e9buttondialog.setVisible(True)
                 self.e9buttonbarLayout.insertStretch(0)
-                self.e9buttonbarLayout.insertStretch(self.e9buttonbarLayout.count())
+                self.e9buttonbarLayout.addStretch(1)
             if self.e10buttonbarLayout.count() > 0:
                 self.e10buttondialog.setVisible(True)
                 self.e10buttonbarLayout.insertStretch(0)
-                self.e10buttonbarLayout.insertStretch(self.e10buttonbarLayout.count())
+                self.e10buttonbarLayout.addStretch(1)
         self.settooltip()
         if self.app.artisanviewerMode:
             self.buttonsAction.setEnabled(False)
@@ -27301,13 +27974,18 @@ class ApplicationWindow(QMainWindow):
 
     @pyqtSlot()
     def update_extraeventbuttons_visibility(self) -> None:
+        roles = getattr(self, 'extraeventslayoutroles', [])
         for i, bl in enumerate(self.buttonlist):
             try:
+                role = roles[i] if i < len(roles) else 0
+                if role != 0:
+                    bl.setVisible(False)
+                    continue
                 if self.extraeventsvisibility[i]:
                     bl.setVisible(True)
                 else:
                     bl.setVisible(False)
-            except Exception as e: # pylint: disable=broad-except
+            except Exception as e:  # pylint: disable=broad-except
                 _log.exception(e)
 
     # returns the number of palette named label or None
